@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # The app's floor is macOS 15 (Package.swift, App/Info.plist), but
+    # building needs Swift 6.2, i.e. Xcode 26, which is the default toolchain
+    # on the macos-26 image. A binary built there for 15 runs its harnesses on
+    # 26 as well. The select step below also covers an image that carries
+    # Xcode 26 next to an older default.
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Swift 6.2 or newer comes with Xcode 26. Select it only if the image
+      # ships it as a non-default Xcode.
+      - name: Select Xcode 26
+        run: |
+          if ls /Applications | grep -q '^Xcode_26'; then
+            XCODE="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
+            echo "Selecting $XCODE"
+            sudo xcode-select -s "$XCODE"
+          else
+            echo "No Xcode_26*.app in /Applications; using the default toolchain"
+          fi
+
+      - name: Swift version
+        run: swift --version
+
+      # Package.resolved is gitignored, so Package.swift is the only input
+      # that decides what SwiftPM fetches.
+      - name: Cache .build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build
+        run: swift build
+
+      # Text-cleanup self-check. Needs no models, no microphone, no TCC.
+      - name: Self-check (--cleanup-test)
+        run: swift run minnas --cleanup-test
+
+      # Delivery backoff and pruning rules. Also no models, no TCC.
+      - name: Self-check (--self-test)
+        run: swift run minnas --self-test
+
+      - name: Shell syntax
+        run: |
+          set -e
+          for f in scripts/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+
+      # The installer and uninstaller print their steps and change nothing.
+      - name: Script dry runs
+        run: |
+          bash scripts/install.sh --dry-run --no-identity --no-launch
+          bash scripts/uninstall.sh --dry-run </dev/null

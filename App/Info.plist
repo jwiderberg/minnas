@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Minnas app bundle template.
+
+  scripts/make-app.sh copies this into .build/Minnas.app/Contents/.
+  Edit here, not in the built copy — the built copy is overwritten on every
+  invocation of make-app.sh. scripts/install.sh reads the bundle id, the
+  display name, the minimum macOS and the usage strings from this file.
+
+  Why this file exists at all: TCC (microphone, system audio, screen
+  recording, calendars) attaches permissions to a bundle identifier. A bare
+  `swift run` binary has none, so the system can't durably remember the
+  user's grant. The .app wrapper gives a stable CFBundleIdentifier so the
+  grant persists across runs.
+
+  Re-granting after rebuilds: ad-hoc code signatures change on every build,
+  which macOS can treat as "this is a new app" and reset the grants. The
+  stable local identity from scripts/setup-signing-identity.sh avoids that.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.jwiderberg.minnas</string>
+
+    <key>CFBundleName</key>
+    <string>Minnas</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Minnas</string>
+
+    <key>CFBundleExecutable</key>
+    <string>minnas</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+
+    <!-- Menubar-only: no dock icon, no main window on launch. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- TCC prompt copy. The microphone string is mandatory; the system
+         refuses to even prompt without it. NSAudioCaptureUsageDescription
+         is the "System Audio Recording" prompt used by the Core Audio
+         process-tap engine (the default, SYSTEM_AUDIO_ENGINE=taps); without
+         it the tap only delivers silence. Screen Recording (the
+         ScreenCaptureKit engine, SYSTEM_AUDIO_ENGINE=sck) has no
+         usage-description key — that grant is driven entirely by the first
+         ScreenCaptureKit call and managed in System Settings. Recordings
+         are kept on disk for the retention period (recordingsKeepDays) so
+         they can be re-transcribed. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Minnas records your microphone so it can transcribe what you say during meetings. Recordings are kept on this Mac for the retention period you choose, so they can be re-transcribed; audio leaves this Mac only if you turn on cloud transcription.</string>
+
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Minnas records the other side of your calls — the audio your Mac plays — so it can transcribe them. Nothing is sent anywhere unless you turn on cloud transcription.</string>
+
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Minnas reads your upcoming meetings so it can offer to record the ones with a Zoom, Meet or Teams link, and name each transcript after its meeting.</string>
+</dict>
+</plist>

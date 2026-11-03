@@ -1,0 +1,36 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Packages/
+*.xcodeproj
+*.xcworkspace
+Package.resolved
+
+# Xcode local state
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Local config + secrets
+.env*
+!.env.example
+secrets/
+
+# Runtime state if a dev run ever points here (the app itself uses ~/Library/Application Support/minnas)
+outbox/
+recordings/
+
+# Whisper model cache (large; never commit)
+models/
+*.gguf
+*.mlmodelc
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
