@@ -624,6 +624,33 @@ if CommandLine.arguments.contains("--settings-window") || CommandLine.arguments.
     exit(0)
 }
 
+// Voice Memos picker harness:
+//   minnas --memo-window
+// Opens the Import Voice Memos picker on its own (no lock, no outbox) so
+// the live-refresh behaviour can be watched beside a running app: prints
+// "window <number>", then "picked <n>" or "closed" and exits. Reads the
+// library, so it needs Full Disk Access (inherited from the terminal).
+if CommandLine.arguments.contains("--memo-window") {
+    func say(_ line: String) { FileHandle.standardOutput.write(Data((line + "\n").utf8)) }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.regular)
+    var retained: [NSWindowController] = []
+    let controller = VoiceMemoImportWindowController(
+        onImport: { picked in say("picked \(picked.count)"); exit(0) },
+        onClose: { say("closed"); exit(0) }
+    )
+    retained.append(controller)
+    controller.showWindow(nil)
+    controller.window?.makeKeyAndOrderFront(nil)
+    Task { @MainActor in
+        try? await Task.sleep(for: .milliseconds(800))
+        if let window = controller.window { say("window \(window.windowNumber)") }
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    app.run()
+    exit(0)
+}
+
 // Transcript text-cleanup harness (no models needed):
 //   minnas --cleanup-test
 // Runs the hallucination filter and text normaliser over a fixed set of

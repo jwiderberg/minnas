@@ -23,8 +23,10 @@ Swedish for "to remember".
 - **Calendar prompts** a few minutes before a meeting that has an online
   meeting link, using Apple's calendar framework (EventKit), so any calendar
   account you have set up on the Mac works. Off until you turn it on.
-- **Voice Memos import** for iPhone memos synced through iCloud, and
-  **Transcribe Audio File…** for any recording made elsewhere.
+- **Voice Memos import** for iPhone memos synced through iCloud (the list
+  updates as memos arrive; since the Mac receives them only while Voice Memos
+  is running, the import window's "Sync from iCloud" button opens it in the
+  background), and **Transcribe Audio File…** for any recording made elsewhere.
 - The language is detected per recording among the languages you list
   (English by default; add others such as Swedish in Settings), and switched
   mid-meeting when the language changes.
@@ -231,8 +233,8 @@ Disk Access (your terminal's, or the app's when run from the bundle).
 The capture harnesses `--mic-test <seconds> <out.caf>` and `--system-test
 <seconds> <out.caf>` need the microphone and recording grants, so run them
 from inside the built app (`.build/Minnas.app/Contents/MacOS/minnas`), as do
-`--calendar` (Calendars grant) and the `--settings-window` / `--onboarding`
-window harnesses. The process-tap test charges its grant to the app that
+`--calendar` (Calendars grant) and the `--settings-window` / `--onboarding` /
+`--memo-window` window harnesses. The process-tap test charges its grant to the app that
 launched it, so start it through LaunchServices:
 `open -W -n -g --stdout /tmp/tap.log --stderr /tmp/tap.log .build/Minnas.app --args --tap-test 30 /tmp/tap.caf`.
 Test any change to the capture code with a real run while switching the

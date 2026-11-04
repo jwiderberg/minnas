@@ -12,6 +12,19 @@
 //   VoiceMemoImportWindowController — the picker: recent memos, a checkbox
 //     per row, an editable title (iOS defaults the title to the nearby
 //     location, which is useless as a note title), and an Import button.
+//     The list is live: a poll of the library's fingerprint
+//     (VoiceMemoLibrary.changeSignature, every few seconds and whenever the
+//     window regains focus) reloads it on change — a memo recorded on the
+//     phone shows up a few seconds after it syncs, and a "not synced" one
+//     turns importable when its file lands — and the Refresh button
+//     reloads unconditionally. The Mac pulls memos from iCloud only while
+//     Voice Memos.app is running (CloudKit sync is driven by the app — a
+//     memo recorded on the phone hours ago is simply absent until then), so
+//     "Sync from iCloud" launches Voice Memos hidden in the background and
+//     the poll shows arrivals. Ticks and edited titles survive a reload
+//     (matched by memo id); a reload never interrupts a title edit in
+//     progress. AppDelegate drops the controller when the
+//     window closes (Cancel included), so reopening never shows an old list.
 //
 // The imported slot behaves like any other recording afterwards: it shows
 // in the Recordings menu, can be re-transcribed with another model (the
@@ -112,7 +125,7 @@ enum VoiceMemoImporter {
 // MARK: - Picker window
 
 @MainActor
-final class VoiceMemoImportWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+final class VoiceMemoImportWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     struct Selection {
         let memo: VoiceMemo
         let title: String
@@ -123,10 +136,14 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
         var title: String
         var selected = false
         var transcriptLabel: String
+        /// Stamp of the audio file when the row was built; a probed label
+        /// is carried across reloads only while this is unchanged.
+        let fileStamp: String?
         init(memo: VoiceMemo) {
             self.memo = memo
             self.title = memo.displayTitle
             self.transcriptLabel = memo.isDownloaded ? "checking…" : "not synced"
+            self.fileStamp = memo.isDownloaded ? VoiceMemoLibrary.fileStamp(memo.fileURL) : nil
         }
     }
 
@@ -137,7 +154,24 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
     /// Shown only when the library is TCC-blocked; opens the Full Disk
     /// Access pane, where the app is already listed (switched off).
     private let grantAccessButton = NSButton(title: "Open Full Disk Access…", target: nil, action: nil)
+    private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
+    private let syncButton = NSButton(title: "Sync from iCloud", target: nil, action: nil)
+    private static let voiceMemosBundleID = "com.apple.VoiceMemos"
+    /// The two halves of the status line: what the last load found, and
+    /// what the Sync button is up to. Kept apart so a reload never erases
+    /// the sync message and a late sync callback never erases the count.
+    private var loadStatus = ""
+    private var syncStatus: String?
     private let onImport: ([Selection]) -> Void
+    private let onClose: () -> Void
+    /// Fingerprint of the library at the last SUCCESSFUL load (nil after a
+    /// failed one, so the next tick retries); the poll compares against it
+    /// so an unchanged library costs a round of stats, never a DB copy.
+    private var loadedSignature: String?
+    private var pollTimer: Timer?
+    /// A fingerprint is in flight off the main thread; ticks don't stack.
+    private var polling = false
+    private static let pollInterval: TimeInterval = 3
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -146,8 +180,9 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
         return f
     }()
 
-    init(onImport: @escaping ([Selection]) -> Void) {
+    init(onImport: @escaping ([Selection]) -> Void, onClose: @escaping () -> Void = {}) {
         self.onImport = onImport
+        self.onClose = onClose
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
             styleMask: [.titled, .closable, .resizable],
@@ -156,8 +191,27 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
         window.title = "Import Voice Memos"
         window.center()
         super.init(window: window)
+        window.delegate = self
         buildUI()
-        load()
+        load(reason: "open")
+        pollTimer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.pollLibrary() }
+        }
+    }
+
+    // MARK: NSWindowDelegate
+
+    /// Coming back to the window (from Voice Memos on the Mac, say, after
+    /// opening a memo there to force its download) checks the library at
+    /// once rather than waiting for the next poll tick.
+    func windowDidBecomeKey(_ notification: Notification) {
+        pollLibrary()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        onClose()
     }
 
     @available(*, unavailable)
@@ -214,13 +268,21 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
         grantAccessButton.action = #selector(openFullDiskAccess)
         grantAccessButton.isHidden = true
 
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshTapped)
+        refreshButton.toolTip = "The list updates on its own as memos sync; this forces it."
+
+        syncButton.target = self
+        syncButton.action = #selector(syncTapped)
+        syncButton.toolTip = "Memos reach this Mac only while Voice Memos is running. Launches it in the background; new memos appear here as they arrive."
+
         importButton.target = self
         importButton.action = #selector(importTapped)
         importButton.keyEquivalent = "\r"
         importButton.isEnabled = false
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelTapped))
         cancel.keyEquivalent = "\u{1b}"
-        let buttons = NSStackView(views: [statusLabel, grantAccessButton, NSView(), cancel, importButton])
+        let buttons = NSStackView(views: [statusLabel, grantAccessButton, syncButton, refreshButton, NSView(), cancel, importButton])
         buttons.orientation = .horizontal
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
@@ -241,18 +303,110 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
         ])
     }
 
-    private func load() {
+    /// (Re)reads the library. Existing rows keep their tick, an edited
+    /// title and an already-probed transcript label; a row whose file has
+    /// since synced is rebuilt so it becomes tickable and gets probed.
+    private func load(reason: String) {
+        importLog.notice("picker load (\(reason, privacy: .public))")
+        // Taken BEFORE the read, so a change that lands mid-read makes the
+        // next poll re-read; accepted only AFTER a successful read, so a
+        // transient failure (torn WAL copy, say) is retried on the next
+        // tick instead of being masked by an already-recorded signature.
+        let signature = VoiceMemoLibrary.changeSignature()
+        let previous = Dictionary(rows.map { ($0.memo.id, $0) }, uniquingKeysWith: { a, _ in a })
         do {
-            rows = try VoiceMemoLibrary.list(limit: 50).map(Row.init)
-            statusLabel.stringValue = rows.isEmpty ? "No voice memos found." : "\(rows.count) recent memos"
+            let fresh = try VoiceMemoLibrary.list(limit: 50)
+            loadedSignature = signature
+            rows = fresh.map { memo in
+                let row = Row(memo: memo)
+                guard let old = previous[memo.id] else { return row }
+                row.selected = old.selected && memo.isDownloaded
+                // Keep a title the user typed; otherwise follow a rename
+                // made in Voice Memos itself.
+                if old.title != old.memo.displayTitle { row.title = old.title }
+                if old.fileStamp != nil && old.fileStamp == row.fileStamp { row.transcriptLabel = old.transcriptLabel }
+                return row
+            }
+            loadStatus = rows.isEmpty ? "No voice memos found." : "\(rows.count) recent memos"
+            grantAccessButton.isHidden = true
         } catch {
-            statusLabel.stringValue = String(describing: error)
+            // Forget the signature so the next tick with a readable folder
+            // retries. A folder that can't even be stat'ed (Full Disk
+            // Access missing — fixing that needs a relaunch anyway) stays
+            // on the message and the Refresh button rather than retrying
+            // every 3 s.
+            loadedSignature = nil
+            loadStatus = String(describing: error)
             if case VoiceMemoLibraryError.accessDenied? = error as? VoiceMemoLibraryError {
                 grantAccessButton.isHidden = false
             }
         }
+        updateStatusLabel()
         table.reloadData()
+        updateImportButton()
         probeTranscripts()
+    }
+
+    /// Reloads unless a title edit is in progress — `reloadData` would
+    /// end the field editor and drop what was typed.
+    private func reloadIfIdle(reason: String) {
+        guard table.editedRow == -1, window?.isVisible == true else { return }
+        load(reason: reason)
+    }
+
+    /// Timer tick: fingerprint the library off the main thread (a stat per
+    /// file in the folder — a few ms for a big library, but not on the UI
+    /// thread); a real reload only on change.
+    private func pollLibrary() {
+        guard !polling else { return }
+        polling = true
+        Task { @MainActor [weak self] in
+            let signature = await Task.detached(priority: .utility) { VoiceMemoLibrary.changeSignature() }.value
+            guard let self else { return }
+            self.polling = false
+            guard signature != self.loadedSignature else { return }
+            self.reloadIfIdle(reason: "library changed")
+        }
+    }
+
+    private func updateStatusLabel() {
+        statusLabel.stringValue = [loadStatus, syncStatus].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    /// Launches Voice Memos hidden. macOS syncs the Voice Memos library
+    /// from iCloud only while the app runs, so this is the one way to make
+    /// a memo recorded on the phone show up here; the poll does the rest.
+    @objc private func syncTapped() {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.voiceMemosBundleID) else {
+            syncStatus = "Voice Memos is not installed on this Mac."
+            updateStatusLabel()
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        config.hides = true
+        syncButton.isEnabled = false
+        syncStatus = "Launching Voice Memos in the background…"
+        updateStatusLabel()
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { [weak self] _, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.syncButton.isEnabled = true
+                if let error {
+                    importLog.error("voice memos launch failed: \(String(describing: error), privacy: .public)")
+                    self.syncStatus = "Could not launch Voice Memos: \(error.localizedDescription)"
+                } else {
+                    importLog.notice("voice memos launched hidden for iCloud sync")
+                    self.syncStatus = "Voice Memos is open in the background; new memos appear here as they arrive."
+                }
+                self.updateStatusLabel()
+            }
+        }
+    }
+
+    @objc private func refreshTapped() {
+        if table.editedRow != -1 { window?.makeFirstResponder(nil) }
+        load(reason: "refresh button")
     }
 
     @objc private func openFullDiskAccess() {
@@ -265,8 +419,9 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
     /// metadata. Cheap (local file headers), but async so the window opens
     /// instantly.
     private func probeTranscripts() {
-        for (index, row) in rows.enumerated() where row.memo.isDownloaded {
+        for (index, row) in rows.enumerated() where row.memo.isDownloaded && row.transcriptLabel == "checking…" {
             let url = row.memo.fileURL
+            let stamp = row.fileStamp
             Task { @MainActor [weak self] in
                 // Informational either way: with the default (STT) policy
                 // it just tells the user the phone had a transcript too.
@@ -277,7 +432,12 @@ final class VoiceMemoImportWindowController: NSWindowController, NSTableViewData
                 } else {
                     label = Config.voiceMemoUsesAppleTranscript() ? "needs STT" : "STT"
                 }
-                guard let self, index < self.rows.count, self.rows[index].memo.id == row.memo.id else { return }
+                // The rows may have been rebuilt meanwhile: write only if
+                // the row at this index is still the same memo AND the
+                // same file version (a rewritten file got its own probe).
+                guard let self, index < self.rows.count,
+                      self.rows[index].memo.id == row.memo.id,
+                      self.rows[index].fileStamp == stamp else { return }
                 self.rows[index].transcriptLabel = label
                 self.table.reloadData(forRowIndexes: IndexSet(integer: index),
                                       columnIndexes: IndexSet(integer: 4))

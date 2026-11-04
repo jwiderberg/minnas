@@ -940,11 +940,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let controller = VoiceMemoImportWindowController { [weak self] picked in
+        let controller = VoiceMemoImportWindowController(onImport: { [weak self] picked in
             guard let self else { return }
             self.voiceMemoImportWindow = nil
             Task { @MainActor in await self.runVoiceMemoImport(picked) }
-        }
+        }, onClose: { [weak self] in
+            // Cancel / the close button: drop the controller so the next
+            // "Import Voice Memos…" reads the library afresh instead of
+            // re-showing a list captured at first open.
+            self?.voiceMemoImportWindow = nil
+        })
         voiceMemoImportWindow = controller
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)

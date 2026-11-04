@@ -64,7 +64,7 @@ Need TCC, so run the binary inside the built bundle
 `--system-test <seconds> <out.caf>` (the configured engine; kills its stream
 at the midpoint), `--audio-test`, `--calendar [within_minutes]` (EventKit),
 `--settings-window [tab] [--test-key] [--grant-calendar] [--snapshot <dir>]`,
-`--onboarding [1-4] [--snapshot <dir>]`.
+`--onboarding [1-4] [--snapshot <dir>]`, `--memo-window` (the Voice Memos picker on its own).
 
 `--tap-test <seconds> <out.caf>` exercises the process tap (signal, midpoint
 kill, output switch, no leaked taps/aggregate devices). The System Audio
@@ -227,6 +227,15 @@ the bundle on every build. Don't edit the built copy.
   and tccd never prompts for it: on first access the bundle appears, switched
   off, under System Settings → Privacy & Security → Full Disk Access (the
   import window offers "Open Full Disk Access…"). Grant it and relaunch.
+  The import list is live: the picker polls `VoiceMemoLibrary.changeSignature`
+  (a stat of every file in the Recordings folder) every 3 s off the main
+  thread and on focus, reloads only on change, keeps ticks and edited titles
+  by memo id, and never reloads mid title-edit; Cancel releases the controller
+  so reopening reads afresh. **The Mac pulls memos from iCloud only while
+  Voice Memos.app is running** — a memo recorded on the phone is simply absent
+  here until then — so the picker's "Sync from iCloud" button launches Voice
+  Memos hidden (`NSWorkspace.OpenConfiguration`, activates=false, hides=true)
+  and the poll shows arrivals. `--memo-window` opens the picker standalone.
 - **Stable signing identity.** TCC keys grants off the code signature. Ad-hoc
   signatures change on every rebuild, which macOS treats as a new app, so the
   grants reset. `bash scripts/setup-signing-identity.sh` (one-time) creates a

@@ -144,8 +144,36 @@ enum VoiceMemoLibrary {
                 fileURL: fileURL, isDownloaded: fm.fileExists(atPath: fileURL.path)
             ))
         }
-        memoLog.info("listed \(memos.count, privacy: .public) voice memos")
+        memoLog.notice("listed \(memos.count, privacy: .public) voice memos")
         return memos
+    }
+
+    /// "mtime:size" of one file, or nil when it can't be stat'ed. Used both
+    /// for the library fingerprint and per memo, so the picker can tell an
+    /// audio file rewritten in place (iCloud syncing the embedded
+    /// transcript into an existing .qta) from an unchanged one.
+    static func fileStamp(_ url: URL) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        return "\(mtime):\(size)"
+    }
+
+    /// A cheap fingerprint of the library: the stamp of every entry in the
+    /// Recordings folder (database, WAL, each audio file — a finished
+    /// iCloud download adds one, a re-synced memo rewrites one in place)
+    /// plus the folder's own mtime. A few hundred stats; the picker polls
+    /// this instead of re-copying the database every few seconds, and a
+    /// change triggers a real `list`. nil when the folder can't be read.
+    static func changeSignature() -> String? {
+        let fm = FileManager.default
+        guard let dirStamp = fileStamp(recordingsURL),
+              let names = try? fm.contentsOfDirectory(atPath: recordingsURL.path) else { return nil }
+        var parts = [dirStamp]
+        for name in names.sorted() {
+            parts.append(name + "=" + (fileStamp(recordingsURL.appendingPathComponent(name)) ?? "-"))
+        }
+        return parts.joined(separator: "|")
     }
 
     /// Looks a memo up by its unique id (the CLI harness takes ids so a
