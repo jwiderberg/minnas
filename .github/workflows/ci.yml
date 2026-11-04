@@ -14,12 +14,13 @@ concurrency:
 
 jobs:
   build:
-    # The app's floor is macOS 15 (Package.swift, App/Info.plist), but
-    # building needs Swift 6.2, i.e. Xcode 26, which is the default toolchain
-    # on the macos-26 image. A binary built there for 15 runs its harnesses on
-    # 26 as well. The select step below also covers an image that carries
-    # Xcode 26 next to an older default.
-    runs-on: macos-26
+    # The app's floor is macOS 15 (Package.swift, App/Info.plist). Building
+    # needs Swift 6.2, i.e. Xcode 26, which the macos-15 image carries as a
+    # non-default install (Xcode_26.x.app) that the select step below picks.
+    # macos-15 is used rather than macos-26 because hosted macOS 26 runners
+    # are in short supply: jobs sat 15 minutes in the queue and were cancelled
+    # unassigned. The floor OS is also the better place to run the harnesses.
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
