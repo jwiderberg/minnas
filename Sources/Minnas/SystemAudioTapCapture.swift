@@ -459,10 +459,15 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     }
 
     /// nonisolated: the HAL calls this on listenerQueue; a closure formed in
-    /// a @MainActor method would carry main-actor isolation there.
+    /// a @MainActor method would carry main-actor isolation there. The hop
+    /// to the main actor takes a strong `let` bound inside the block: Swift
+    /// 6.2 treats the weak capture box itself as task-isolated and refuses to
+    /// send it into the Task (6.3 accepts it). The reference lives only until
+    /// the Task runs.
     private nonisolated static func makeDeviceListener(owner: SystemAudioTapCapture) -> AudioObjectPropertyListenerBlock {
         return { [weak owner] _, _ in
-            Task { @MainActor in owner?.defaultOutputChanged() }
+            guard let owner else { return }
+            Task { @MainActor in owner.defaultOutputChanged() }
         }
     }
 
