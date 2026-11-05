@@ -40,13 +40,13 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      # Package.resolved is gitignored, so Package.swift is the only input
-      # that decides what SwiftPM fetches.
+      # Package.resolved is committed, so a build gets exactly the dependency
+      # versions it names; the cache follows it.
       - name: Cache .build
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-spm-
 

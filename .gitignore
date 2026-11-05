@@ -4,7 +4,6 @@
 Packages/
 *.xcodeproj
 *.xcworkspace
-Package.resolved
 
 # Xcode local state
 xcuserdata/

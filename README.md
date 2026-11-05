@@ -243,8 +243,14 @@ default input or output device. `CLAUDE.md` holds the engineering rules.
 Continuous integration (`.github/workflows/ci.yml`) builds the package, runs
 `--cleanup-test` and `--self-test`, and checks the shell scripts (syntax and
 dry runs). It downloads no models and needs no permissions. It runs on the
-macOS 26 image because building needs Xcode 26; the app itself runs on
-macOS 15 and later.
+`macos-15` image with that image's Xcode 26 install (Swift 6.2), which is the
+oldest toolchain the package supports and stricter than Xcode 26.6's Swift
+6.3 about concurrency, so a build that passes locally on a newer Xcode can
+still fail there.
+
+`Package.resolved` is committed: a build of a given commit uses exactly the
+dependency versions it names. Update it on purpose with
+`swift package update`, and read the diff.
 
 ## Licence
 

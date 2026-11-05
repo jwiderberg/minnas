@@ -111,7 +111,8 @@ Please report privately through a GitHub security advisory on the repository:
 Include what you found, how to reproduce it, and the macOS version. Please do
 not open a public issue for something that exposes recordings or keys. This is
 a one-person project, so expect an acknowledgement within about a week; fixes
-are made on a best-effort basis and credited in the release notes unless you
+are made on a best-effort basis and credited in the fixing commit unless you
 prefer otherwise.
 
-Supported version: the latest release and the `main` branch.
+Supported version: the `main` branch. There are no packaged releases; the
+supported install is a build from source.
