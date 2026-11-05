@@ -1,0 +1,296 @@
+name: Release
+
+# Builds a notarized Minnas.app from a tagged commit and publishes it.
+#
+# Trigger with a tag:   git tag v0.1.0 && git push origin v0.1.0
+# The tag must equal "v" + CFBundleShortVersionString in App/Info.plist.
+#
+# Dry run (no release, the zip is uploaded as a workflow artifact instead):
+#   gh workflow run release.yml -f publish=false
+#
+# What a user can verify afterwards, and what each check proves:
+#   shasum -a 256 -c Minnas-<v>.zip.sha256      the download is intact
+#   gh attestation verify Minnas-<v>.zip --repo jwiderberg/minnas
+#                                              THIS workflow built THIS file
+#                                              from the tagged commit (Sigstore)
+#   spctl --assess --type execute Minnas.app   Apple notarized it; the
+#                                              signature is a Developer ID
+#
+# Secrets (set them with scripts/release-secrets.sh):
+#   DEVELOPER_ID_P12_BASE64     "Developer ID Application" certificate + key,
+#                               PKCS#12, base64
+#   DEVELOPER_ID_P12_PASSWORD   its password
+#   NOTARY_KEY_P8_BASE64        App Store Connect API key (.p8), base64
+#   NOTARY_KEY_ID               its Key ID
+#   NOTARY_ISSUER_ID            the team's Issuer ID
+#
+# Order matters for the key: the whole build (SwiftPM, dependencies, any
+# macro or plugin they run) finishes BEFORE the certificate is imported, the
+# signing step is the only one that sees it, and the throwaway keychain is
+# deleted right after signing, with an always() fallback at the end.
+# Third-party actions are pinned to commit SHAs (version in the comment).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the GitHub release (only possible on a tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # create the release and upload assets
+  id-token: write # Sigstore signing of the provenance attestation
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Same image and toolchain selection as ci.yml: the floor OS, with the
+    # Xcode 26 the image carries as a non-default install.
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      KEYCHAIN: ${{ runner.temp }}/release.keychain-db
+      DIST: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -z "$XCODE" ]]; then
+            echo "::error::no Xcode_26*.app on this runner image; the release build needs Swift 6.2"
+            ls /Applications | grep -i xcode || true
+            exit 1
+          fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version | grep -E '^Xcode 26([.]|$)'
+          swift --version
+
+      - name: Version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/Info.plist)"
+          echo "App/Info.plist CFBundleShortVersionString = $VERSION"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${VERSION}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match App/Info.plist version v${VERSION}; bump the plist, commit, then tag that commit"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "artifact=Minnas-$VERSION.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Cache .build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      # The complete build, before any secret is in reach.
+      - name: Build
+        run: swift build -c release
+
+      - name: Import Developer ID certificate
+        id: identity
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "$DEVELOPER_ID_P12_BASE64" || -z "$DEVELOPER_ID_P12_PASSWORD" ]]; then
+            echo "::error::DEVELOPER_ID_P12_BASE64 / DEVELOPER_ID_P12_PASSWORD are not set; run scripts/release-secrets.sh"
+            exit 1
+          fi
+          P12="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$P12"
+
+          # Apple's "Developer ID Certification Authority (G2)" intermediate.
+          # codesign needs the full chain in a keychain; the runner image does
+          # not necessarily carry it. Pinned by SHA-256 (fetched 2026-11-05 from
+          # https://www.apple.com/certificateauthority/; valid to 2031-09-17).
+          CA="$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          curl -sSfL -o "$CA" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $CA" | shasum -a 256 -c -
+
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 1800 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CA" -k "$KEYCHAIN" -T /usr/bin/codesign >/dev/null
+          security import "$P12" -k "$KEYCHAIN" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -f pkcs12 >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Prepend the throwaway keychain to the user search list so codesign
+          # can find the chain; the existing entries are kept.
+          EXISTING=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line%\"}"; line="${line#\"}"
+            [[ -n "$line" ]] && EXISTING+=("$line")
+          done < <(security list-keychains -d user)
+          if (( ${#EXISTING[@]} )); then
+            security list-keychains -d user -s "$KEYCHAIN" "${EXISTING[@]}"
+          else
+            security list-keychains -d user -s "$KEYCHAIN"
+          fi
+          rm -f "$P12"
+
+          IDENTITY="$(security find-identity -p codesigning -v "$KEYCHAIN" | sed -nE 's/.*"(Developer ID Application: [^"]*)".*/\1/p' | head -n 1)"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::the imported certificate holds no valid 'Developer ID Application' identity"
+            security find-identity -p codesigning "$KEYCHAIN" || true
+            exit 1
+          fi
+          echo "Signing identity: $IDENTITY"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      # SKIP_BUILD: the binary is already built; this only assembles and signs.
+      - name: Assemble and sign
+        env:
+          SKIP_BUILD: "1"
+          CODESIGN_IDENTITY: ${{ steps.identity.outputs.identity }}
+          CODESIGN_KEYCHAIN: ${{ env.KEYCHAIN }}
+        run: bash scripts/make-app.sh
+
+      - name: Remove the signing keychain
+        run: |
+          set -euo pipefail
+          security delete-keychain "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+
+      - name: Inspect signature
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 .build/Minnas.app
+          codesign -dvv .build/Minnas.app 2>&1 | grep -E '^(Identifier|TeamIdentifier|Authority|Timestamp|Runtime Version)='
+          codesign -d --entitlements - --xml .build/Minnas.app | plutil -p -
+
+      - name: Notarize
+        env:
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "$NOTARY_KEY_P8_BASE64" || -z "$NOTARY_KEY_ID" || -z "$NOTARY_ISSUER_ID" ]]; then
+            echo "::error::NOTARY_* secrets are not set; run scripts/release-secrets.sh"
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$KEY"
+          UPLOAD="$RUNNER_TEMP/notarize.zip"
+          ditto -c -k --keepParent .build/Minnas.app "$UPLOAD"
+
+          xcrun notarytool submit "$UPLOAD" \
+            --key "$KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json" || true
+          cat "$RUNNER_TEMP/notary.json"
+          STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$RUNNER_TEMP/notary.json" 2>/dev/null || true)"
+          ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$RUNNER_TEMP/notary.json" 2>/dev/null || true)"
+          if [[ "$STATUS" != "Accepted" ]]; then
+            echo "::error::notarization status: ${STATUS:-unknown}"
+            if [[ -n "$ID" ]]; then
+              xcrun notarytool log "$ID" --key "$KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" || true
+            fi
+            rm -f "$KEY"
+            exit 1
+          fi
+          rm -f "$KEY"
+
+      - name: Staple and assess
+        run: |
+          set -euo pipefail
+          xcrun stapler staple .build/Minnas.app
+          xcrun stapler validate .build/Minnas.app
+          # Gatekeeper's own verdict. "Notarized Developer ID" is the only
+          # acceptable source for a download.
+          spctl --assess --type execute --verbose=2 .build/Minnas.app 2>&1 | tee "$RUNNER_TEMP/spctl.txt"
+          grep -q 'source=Notarized Developer ID' "$RUNNER_TEMP/spctl.txt"
+
+      - name: Package
+        id: package
+        env:
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIST"
+          ditto -c -k --keepParent .build/Minnas.app "$DIST/$ARTIFACT"
+          (cd "$DIST" && shasum -a 256 "$ARTIFACT" > "$ARTIFACT.sha256" && cat "$ARTIFACT.sha256")
+          TEAM="$(codesign -dvv .build/Minnas.app 2>&1 | sed -nE 's/^TeamIdentifier=(.*)$/\1/p')"
+          echo "team=$TEAM" >> "$GITHUB_OUTPUT"
+
+      # Sigstore-signed statement that this workflow run produced the zip from
+      # this commit. Verifiable offline from the repo name alone.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: ${{ env.DIST }}/${{ steps.version.outputs.artifact }}
+
+      - name: Release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+          TEAM: ${{ steps.package.outputs.team }}
+        run: |
+          set -euo pipefail
+          SHA="$(cut -d' ' -f1 "$DIST/$ARTIFACT.sha256")"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Minnas $VERSION, built by this repository's release workflow from commit \`${GITHUB_SHA}\`, signed with a Developer ID certificate and notarized by Apple.
+
+          **Install:** download \`$ARTIFACT\`, unzip, move Minnas.app to /Applications, open it. macOS 15 or newer on Apple silicon. The first run walks through the permissions; see the README.
+
+          **Verify** (each line proves one thing):
+
+          \`\`\`sh
+          shasum -a 256 -c $ARTIFACT.sha256           # the download is intact
+          gh attestation verify $ARTIFACT --repo ${GITHUB_REPOSITORY}
+                                                       # this exact file was built by this
+                                                       # workflow from the tagged commit
+          spctl --assess --type execute -vv Minnas.app  # "accepted source=Notarized Developer ID"
+          codesign -dvv Minnas.app 2>&1 | grep TeamIdentifier   # TeamIdentifier=$TEAM
+          \`\`\`
+
+          SHA-256: \`$SHA\`
+
+          Building from source is still supported and documented in the README. A source build is signed with your own local identity, so macOS treats it as a different app from this download for permission grants.
+          EOF
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Publish release
+        if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" "$DIST"/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Minnas $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag
+
+      - name: Upload artifact (dry run)
+        if: github.ref_type != 'tag' || !(github.event_name == 'push' || inputs.publish)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.version.outputs.artifact }}
+          path: ${{ env.DIST }}
+          if-no-files-found: error
+
+      - name: Remove the signing keychain (fallback)
+        if: always()
+        run: |
+          if [[ -f "$KEYCHAIN" ]]; then
+            security delete-keychain "$KEYCHAIN" || rm -f "$KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/AuthKey.p8"

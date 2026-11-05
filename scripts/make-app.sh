@@ -9,6 +9,16 @@
 # with App/Info.plist, then signs it (hardened runtime, App/Minnas.entitlements)
 # with the local "Minnas Dev" identity if present, else ad-hoc.
 #
+# CODESIGN_IDENTITY=<name> signs with that identity instead, and
+# CODESIGN_KEYCHAIN=<path> restricts the lookup and the signing to that
+# keychain. The release workflow (.github/workflows/release.yml) sets both to
+# the "Developer ID Application" certificate in a throwaway keychain; a
+# Developer ID signature gets a secure timestamp, which notarization requires.
+# Local identities are signed without one (no network, and a self-signed
+# certificate cannot be timestamped anyway). SKIP_BUILD=1 skips `swift build`
+# and only assembles and signs the binary already in .build (the release
+# workflow builds before the signing key is anywhere near the runner).
+#
 # Output: .build/Minnas.app — launch with `open .build/Minnas.app`.
 #
 # Run as: bash scripts/make-app.sh
@@ -30,10 +40,18 @@ if [[ ! -f "$INFO_PLIST" ]]; then
     exit 1
 fi
 
-echo "==> swift build -c $CONFIG"
-swift build -c "$CONFIG"
-
-BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$EXECUTABLE_NAME"
+if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
+    # No swift invocation at all on this path, not even --show-bin-path:
+    # SwiftPM evaluates the manifest, and the release workflow runs this
+    # step with the signing key in reach. .build/<config> is SwiftPM's
+    # stable symlink to the per-architecture build directory.
+    echo "==> SKIP_BUILD=1: using the existing $CONFIG build"
+    BIN_PATH=".build/$CONFIG/$EXECUTABLE_NAME"
+else
+    echo "==> swift build -c $CONFIG"
+    swift build -c "$CONFIG"
+    BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$EXECUTABLE_NAME"
+fi
 if [[ ! -x "$BIN_PATH" ]]; then
     echo "FAIL: expected built binary at $BIN_PATH" >&2
     exit 1
@@ -66,7 +84,27 @@ if grep -q _nemo_ <<<"$NM_OUT"; then
 fi
 
 IDENTITY_NAME="Minnas Dev"
-if security find-identity -p codesigning -v 2>/dev/null | grep -q "$IDENTITY_NAME"; then
+if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    if [[ -n "${CODESIGN_KEYCHAIN:-}" ]]; then
+        [[ -f "$CODESIGN_KEYCHAIN" ]] || { echo "FAIL: CODESIGN_KEYCHAIN '$CODESIGN_KEYCHAIN' does not exist." >&2; exit 1; }
+    fi
+    if ! security find-identity -p codesigning -v ${CODESIGN_KEYCHAIN:+"$CODESIGN_KEYCHAIN"} 2>/dev/null | grep -qF "\"$CODESIGN_IDENTITY\""; then
+        echo "FAIL: CODESIGN_IDENTITY '$CODESIGN_IDENTITY' is not a valid code-signing identity${CODESIGN_KEYCHAIN:+ in $CODESIGN_KEYCHAIN}." >&2
+        exit 1
+    fi
+    TIMESTAMP="--timestamp=none"
+    case "$CODESIGN_IDENTITY" in
+        "Developer ID Application:"*) TIMESTAMP="--timestamp" ;;
+    esac
+    echo "==> codesign with '$CODESIGN_IDENTITY' ($TIMESTAMP${CODESIGN_KEYCHAIN:+, keychain $CODESIGN_KEYCHAIN})"
+    # Two invocations rather than an optional-argument array: an empty array
+    # expanded under `set -u` is an error in the macOS /bin/bash (3.2).
+    if [[ -n "${CODESIGN_KEYCHAIN:-}" ]]; then
+        codesign --force --sign "$CODESIGN_IDENTITY" --keychain "$CODESIGN_KEYCHAIN" --options runtime --entitlements "$ENTITLEMENTS" "$TIMESTAMP" "$APP_DIR"
+    else
+        codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --entitlements "$ENTITLEMENTS" "$TIMESTAMP" "$APP_DIR"
+    fi
+elif security find-identity -p codesigning -v 2>/dev/null | grep -q "$IDENTITY_NAME"; then
     echo "==> codesign with '$IDENTITY_NAME'"
     codesign --force --sign "$IDENTITY_NAME" --options runtime --entitlements "$ENTITLEMENTS" --timestamp=none "$APP_DIR"
 else
@@ -76,7 +114,7 @@ else
     codesign --force --sign - --options runtime --entitlements "$ENTITLEMENTS" --timestamp=none "$APP_DIR"
 fi
 
-codesign --verify --verbose=1 "$APP_DIR"
+codesign --verify --deep --strict --verbose=1 "$APP_DIR"
 
 echo ""
 echo "Built: $APP_DIR"

@@ -97,11 +97,42 @@ fixed.
   verify.
 - **Supply chain.** The app builds on WhisperKit and FluidAudio. Dependency
   versions are resolved by SwiftPM when you build; read what you build.
-- **A self-signed identity is not Apple notarization.** The identity only gives
-  macOS a stable signature to attach permissions to. Nobody but you vouches for
-  the build, which is why the supported install is "read and build from source".
+- **A source build is self-signed, not notarized.** The local identity only
+  gives macOS a stable signature to attach permissions to; nobody but you
+  vouches for that build. Downloaded releases are notarized; see Releases.
 - **Recording consent.** Whether you may record a conversation depends on where
   you and the other people are. That is your responsibility.
+
+## Releases
+
+A release is produced by `.github/workflows/release.yml` on a hosted GitHub
+runner, from the commit the tag points at. The runner signs the app with a
+Developer ID Application certificate, submits it to Apple's notary service,
+staples the ticket, zips it, and publishes the zip, its SHA-256 and a
+Sigstore-signed build-provenance attestation.
+
+What that lets you check (commands in the README under "Verify a download"):
+
+- The SHA-256 says the file you hold is the file that was published.
+- `gh attestation verify` says this exact file was produced by this
+  repository's release workflow from that commit. The statement is signed by
+  GitHub through Sigstore; the repository cannot forge it after the fact.
+- `spctl --assess` says Apple's notary service scanned the binary and that it
+  is signed by a Developer ID certificate. The Team ID is in the release notes.
+
+What it does not prove: that the source is harmless (read it), that the
+dependencies are (read `Package.resolved`), or that the macOS runner image was
+clean (we trust GitHub for that, as everyone using hosted runners does).
+
+Where the keys are. The Developer ID certificate's private key and the
+notarization API key are GitHub repository secrets, readable only by workflow
+runs. Someone who takes over the GitHub account, or finds a way to run code in
+this repository's Actions, could sign a build. Mitigations: the attestation
+would still name the commit and workflow that produced it, so a build that did
+not come from a tagged commit on this repository is detectable; Apple can
+revoke the certificate; and every notarized build is on record with Apple.
+The local "Minnas Dev" identity used for source builds is a separate key that
+never leaves your Mac.
 
 ## Reporting a vulnerability
 
@@ -111,8 +142,7 @@ Please report privately through a GitHub security advisory on the repository:
 Include what you found, how to reproduce it, and the macOS version. Please do
 not open a public issue for something that exposes recordings or keys. This is
 a one-person project, so expect an acknowledgement within about a week; fixes
-are made on a best-effort basis and credited in the fixing commit unless you
+are made on a best-effort basis and credited in the release notes unless you
 prefer otherwise.
 
-Supported version: the `main` branch. There are no packaged releases; the
-supported install is a build from source.
+Supported version: the latest release and the `main` branch.

@@ -40,7 +40,17 @@ Swedish for "to remember".
 
 ## Install
 
-There is no download; you build it yourself, from a clone you can read.
+### Download
+
+Each [release](https://github.com/jwiderberg/minnas/releases) carries a
+`Minnas-<version>.zip` built by GitHub Actions from the tagged commit, signed
+with a Developer ID certificate and notarized by Apple, so it opens without a
+Gatekeeper warning. Unzip it, move Minnas.app to /Applications, open it.
+[Verify a download](#verify-a-download) explains how to check what you got.
+
+### Build from source
+
+Or build it yourself, from a clone you can read:
 
 ```sh
 git clone https://github.com/jwiderberg/minnas.git
@@ -77,6 +87,31 @@ identity ("Minnas Dev") is one self-signed certificate and key in your login
 keychain. It is trusted by nobody else and only signs builds made on this Mac.
 Say no, or pass `--no-identity`, if you would rather not, and expect to
 re-grant permissions after each rebuild.
+
+A source build and a downloaded release are signed by different
+certificates, so macOS keeps separate permission grants for them. Use one or
+the other; switching means granting again.
+
+### Verify a download
+
+Each check proves one thing. The first two need the
+[GitHub CLI](https://cli.github.com); the last two are built into macOS.
+
+```sh
+shasum -a 256 -c Minnas-<version>.zip.sha256         # the file is intact
+gh attestation verify Minnas-<version>.zip --repo jwiderberg/minnas
+     # this exact file was produced by this repository's release workflow
+     # from the tagged commit (a Sigstore-signed statement from GitHub)
+spctl --assess --type execute -vv Minnas.app          # "accepted source=Notarized Developer ID"
+codesign -dvv Minnas.app 2>&1 | grep TeamIdentifier   # the Team ID shown in the release notes
+```
+
+The attestation ties the binary to public source; notarization says Apple
+scanned it and that the signer holds a Developer ID. Neither proves the source
+is harmless: read it, and read `Package.resolved` for what it pulls in. The
+release notes carry the SHA-256 and the Team ID. See
+[SECURITY.md](SECURITY.md#releases) for how releases are built and what a
+compromise would look like.
 
 ## Uninstall
 
@@ -202,6 +237,9 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 - **"Minnas is already running."** Only one copy may run, because a second one
   would treat a live recording as interrupted. Find the first copy in the menu
   bar, or quit it with Activity Monitor, then launch again.
+- **Asked for permission again after switching between a download and a source
+  build.** They are signed by different certificates and macOS treats them as
+  different apps for permissions. Stick with one.
 - **Asked for permission again after a rebuild.** You built without the signing
   identity, so the signature changed. Run `bash scripts/setup-signing-identity.sh`
   once and rebuild. If a stale entry remains, remove the app from the list in
@@ -251,6 +289,16 @@ still fail there.
 `Package.resolved` is committed: a build of a given commit uses exactly the
 dependency versions it names. Update it on purpose with
 `swift package update`, and read the diff.
+
+**Releases** (`.github/workflows/release.yml`): bump `CFBundleShortVersionString`
+in `App/Info.plist`, commit, tag that commit `v<version>` and push the tag. The
+workflow builds on the same image as CI, signs with the Developer ID
+certificate, notarizes and staples, zips, writes the SHA-256, attests the
+build's provenance and creates the GitHub release with verification
+instructions. The five secrets it needs are loaded once with
+`scripts/release-secrets.sh`. `gh workflow run release.yml -f publish=false`
+runs everything except the release and uploads the zip as a workflow
+artifact.
 
 ## Licence
 

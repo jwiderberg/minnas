@@ -258,3 +258,22 @@ over HTTPS — no SDK. Keep new dependencies out unless there is no other way.
 
 `.gitignore` reserves `outbox/`, `recordings/` and `models/`. Never commit
 recordings, transcripts, model files or a `.env`.
+
+## Releases
+
+`.github/workflows/release.yml` runs on a `v*` tag: build on `macos-15` with
+the image's Xcode 26, sign with the "Developer ID Application" certificate
+(`CODESIGN_IDENTITY` env to `scripts/make-app.sh`, which then signs with a
+secure timestamp), notarize with `notarytool` (App Store Connect API key),
+staple, `spctl --assess` must say `Notarized Developer ID`, zip with `ditto`,
+SHA-256, `actions/attest-build-provenance`, `gh release create`. The tag must
+equal `v` + `CFBundleShortVersionString` in `App/Info.plist`, or the job fails
+before building. Secrets: `DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`,
+`NOTARY_KEY_P8_BASE64`, `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`, loaded with
+`scripts/release-secrets.sh` (asks for the .p12 password, never prints a
+value). Dry run without publishing: `gh workflow run release.yml -f publish=false`
+(zip lands as a workflow artifact). The Developer ID intermediate CA is
+fetched from apple.com and checked against a pinned SHA-256 in the workflow.
+Source builds keep the local "Minnas Dev" identity; a user who switches
+between a download and a source build re-grants TCC, because the signatures
+differ.
