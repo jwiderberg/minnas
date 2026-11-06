@@ -70,8 +70,10 @@ all your transcriptions, regardless of platform, local and in an open format
   further into "Them (A)", "Them (B)" and so on.
 - Each meeting becomes a Markdown file in a folder of your choice. A notes
   vault, a synced folder, wherever.
-- If you want higher accuracy and don't mind that one recording's audio is
-  uploaded, you can add your own OpenAI key and transcribe in the cloud.
+- While WhisperKit provides excellent, fast transcription in many languages,
+  sometimes GPT-4o can provide better accuracy. If you don't mind that one
+  recording's audio is uploaded, you can add your own OpenAI key and
+  transcribe in the cloud.
 - A calendar prompt a few minutes before any meeting that has an online
   meeting link. It uses Apple's EventKit, so whatever calendar accounts the
   Mac already has will work. Off until you turn it on.
