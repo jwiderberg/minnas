@@ -1,7 +1,7 @@
 //
 // Lazy-loaded WhisperKit wrapper.
 //
-// The model (~1.5GB of CoreML packages) downloads on first use into
+// The model (~2.9 GB of CoreML packages) downloads on first use into
 // ~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/ by
 // default; subsequent calls reuse the on-disk cache. WhisperKit's
 // pipeline state itself takes a few seconds to load even from cache,
@@ -84,6 +84,8 @@ final class Transcriber: @unchecked Sendable {
     enum TranscriberError: Error {
         case loadFailed(underlying: Error)
         case transcribeFailed(underlying: Error)
+        case audioReadFailed(path: String, start: Double, underlying: Error)
+        case audioEndedEarly(path: String, start: Double, expectedEnd: Double)
     }
 
     private var pipeline: WhisperKit?
@@ -193,7 +195,7 @@ final class Transcriber: @unchecked Sendable {
         let starts: [Double] = stride(from: min(15, duration / 2), to: duration - 10, by: step).map { $0 }
         var scores: [String: Float] = [:]
         for start in starts {
-            guard let array = Self.loadWindow(audioPath, start: start, length: 30),
+            guard let array = try? Self.loadWindow(audioPath, start: start, length: 30),
                   Self.speechSeconds(array) >= 2.5 else { continue }
             let vote = try await languageVote(pipe, array, candidates: candidates)
             traceLine("probe \(Int(start))s: \(vote.describe)")
@@ -231,11 +233,11 @@ final class Transcriber: @unchecked Sendable {
         return LanguageVote(top: detected.language, probabilities: probabilities)
     }
 
-    private static func loadWindow(_ audioPath: String, start: Double, length: Double) -> [Float]? {
-        guard let buffer = try? AudioProcessor.loadAudio(
+    private static func loadWindow(_ audioPath: String, start: Double, length: Double) throws -> [Float]? {
+        let buffer = try AudioProcessor.loadAudio(
             fromPath: audioPath, channelMode: .sumChannels(nil),
             startTime: start, endTime: start + length, maxReadFrameSize: nil
-        ) else { return nil }
+        )
         let array = AudioProcessor.convertBufferToArray(buffer: buffer)
         return array.count > 16_000 ? array : nil
     }
@@ -308,7 +310,25 @@ final class Transcriber: @unchecked Sendable {
         while t < duration - 0.5 {
             var end = min(t + window, duration)
             if duration - end < minTail { end = duration }
-            guard let array = Self.loadWindow(audioPath, start: t, length: end - t) else { break }
+            let array: [Float]
+            do {
+                guard let loaded = try Self.loadWindow(audioPath, start: t, length: end - t) else {
+                    // A sub-second tail at the known asset end is normal.
+                    // The same short read before that point means the file
+                    // disappeared or became unreadable mid-transcription.
+                    if end >= duration - 0.01 { break }
+                    throw TranscriberError.audioEndedEarly(path: audioPath, start: t, expectedEnd: end)
+                }
+                let expectedFrames = Int((end - t) * 16_000)
+                if end < duration - 0.01, loaded.count + 1_600 < expectedFrames {
+                    throw TranscriberError.audioEndedEarly(path: audioPath, start: t, expectedEnd: end)
+                }
+                array = loaded
+            } catch let error as TranscriberError {
+                throw error
+            } catch {
+                throw TranscriberError.audioReadFailed(path: audioPath, start: t, underlying: error)
+            }
 
             // Language switching considers only windows with enough
             // speech-level audio: on silence/breath the detector leans "en"

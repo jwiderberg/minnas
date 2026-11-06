@@ -297,6 +297,31 @@ enum Outbox {
         return slots
     }
 
+    /// Reap exports interrupted before their final rename. These sidecars
+    /// are never valid read targets; the intact .caf remains authoritative.
+    static func removeCompressionTemporaryFiles() {
+        let fm = FileManager.default
+        let directories = (try? fm.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        )) ?? []
+        for directory in directories {
+            guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+            let slot = slot(forDir: directory)
+            guard fm.fileExists(atPath: slot.metaURL.path) else { continue }
+            for compressed in [slot.micCompressedURL, slot.systemCompressedURL] {
+                let part = compressed.appendingPathExtension("part")
+                guard fm.fileExists(atPath: part.path) else { continue }
+                do {
+                    try fm.removeItem(at: part)
+                    outboxLog.notice("removed interrupted compression \(part.lastPathComponent, privacy: .public) from \(slot.slug, privacy: .public)")
+                } catch {
+                    outboxLog.error("couldn't remove interrupted compression \(part.lastPathComponent, privacy: .public) from \(slot.slug, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+    }
+
     /// Transcode a slot's raw .caf captures to compressed m4a and delete the
     /// originals. Idempotent (skips a stream already compressed or missing).
     /// Best-effort: a failure leaves the raw .caf in place.
@@ -307,36 +332,54 @@ enum Outbox {
             (raw: slot.systemAudioURL, compressed: slot.systemCompressedURL),
         ]
         for stream in streams {
-            guard fm.fileExists(atPath: stream.raw.path),
-                  !fm.fileExists(atPath: stream.compressed.path) else { continue }
+            guard fm.fileExists(atPath: stream.raw.path) else { continue }
+            if fm.fileExists(atPath: stream.compressed.path) {
+                guard let validated = validatedCompression(stream.compressed, against: stream.raw) else {
+                    try? fm.removeItem(at: stream.compressed)
+                    continue
+                }
+                try? fm.removeItem(at: stream.raw)
+                outboxLog.info("validated existing \(stream.compressed.lastPathComponent, privacy: .public) (\(validated.size, privacy: .public) bytes, peak=\(validated.peak, privacy: .public)); raw removed")
+                continue
+            }
             do {
                 try await AudioExport.transcodeToM4A(source: stream.raw, destination: stream.compressed)
                 // Only drop the original once the compressed file exists AND
                 // is actually readable with audio in it — guards against a
                 // truncated/corrupt export silently losing the recording.
-                let readableFrames = (try? AVAudioFile(forReading: stream.compressed))?.length ?? 0
-                let size = (try? fm.attributesOfItem(atPath: stream.compressed.path)[.size] as? Int) ?? 0
-                guard readableFrames > 0, size > 1024 else {
-                    outboxLog.error("compressed \(stream.raw.lastPathComponent, privacy: .public) unreadable (frames=\(readableFrames, privacy: .public) size=\(size, privacy: .public)); keeping raw")
-                    continue
-                }
-                // Never delete the raw .caf if the compressed copy is silent
-                // while the raw is NOT — that's audio lost in transcode, and
-                // the raw is the only remaining copy. (A raw that is itself
-                // silent is safe to drop: nothing is lost either way.)
-                let silenceThreshold: Float = 0.001
-                let compressedPeak = Self.peakAmplitude(of: stream.compressed) ?? 0
-                if compressedPeak < silenceThreshold,
-                   let rawPeak = Self.peakAmplitude(of: stream.raw), rawPeak >= silenceThreshold {
-                    outboxLog.error("compressed \(stream.raw.lastPathComponent, privacy: .public) is SILENT (peak=\(compressedPeak, privacy: .public)) but raw has signal (peak=\(rawPeak, privacy: .public)) — KEEPING raw to avoid data loss")
+                guard let validated = validatedCompression(stream.compressed, against: stream.raw) else {
+                    try? fm.removeItem(at: stream.compressed)
                     continue
                 }
                 try? fm.removeItem(at: stream.raw)
-                outboxLog.info("compressed \(stream.raw.lastPathComponent, privacy: .public) → m4a (\(size, privacy: .public) bytes, peak=\(compressedPeak, privacy: .public)), raw removed")
+                outboxLog.info("compressed \(stream.raw.lastPathComponent, privacy: .public) → m4a (\(validated.size, privacy: .public) bytes, peak=\(validated.peak, privacy: .public)), raw removed")
             } catch {
                 outboxLog.error("compress \(stream.raw.lastPathComponent, privacy: .public) failed: \(String(describing: error), privacy: .public)")
             }
         }
+    }
+
+    /// Applies the existing duration/size and peak checks to both newly
+    /// exported and pre-existing compressed files.
+    private static func validatedCompression(_ compressed: URL, against raw: URL) -> (size: Int, peak: Float)? {
+        let fm = FileManager.default
+        let readableFrames = (try? AVAudioFile(forReading: compressed))?.length ?? 0
+        let size = (try? fm.attributesOfItem(atPath: compressed.path)[.size] as? Int) ?? 0
+        guard readableFrames > 0, size > 1024 else {
+            outboxLog.error("compressed \(raw.lastPathComponent, privacy: .public) unreadable (frames=\(readableFrames, privacy: .public) size=\(size, privacy: .public)); deleting compressed and keeping raw")
+            return nil
+        }
+        // Never delete the raw .caf if the compressed copy is silent while
+        // the raw is NOT — that's audio lost in transcode, and the raw is the
+        // only remaining copy. A raw that is itself silent is safe to drop.
+        let silenceThreshold: Float = 0.001
+        let compressedPeak = Self.peakAmplitude(of: compressed) ?? 0
+        if compressedPeak < silenceThreshold,
+           let rawPeak = Self.peakAmplitude(of: raw), rawPeak >= silenceThreshold {
+            outboxLog.error("compressed \(raw.lastPathComponent, privacy: .public) is SILENT (peak=\(compressedPeak, privacy: .public)) but raw has signal (peak=\(rawPeak, privacy: .public)) — deleting compressed and KEEPING raw to avoid data loss")
+            return nil
+        }
+        return (size, compressedPeak)
     }
 
     /// Peak absolute sample amplitude (0…~1) of an audio file, or nil if it

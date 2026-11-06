@@ -51,6 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // both calling session.stop() on the same recording, which would
     // double-transcribe. Set on MainActor before the stop's first await.
     private var isStopping = false
+    private var stopTask: Task<Void, Never>?
+
+    // AppKit termination is synchronous, but a clean recording stop is not.
+    // Keep the app alive long enough to flush both writers and persist
+    // ended_at, with a bounded escape hatch if capture shutdown wedges.
+    private var terminationDeadlineTask: Task<Void, Never>?
+    private var terminationReplyPending = false
+    private static let terminationDeadlineNanoseconds: UInt64 = 15_000_000_000
+    private var recoveryRetryTask: Task<Void, Never>?
 
     // Cached count of recordings with a pending delivery, for the menu
     // badge. The menu is rebuilt every second during recording
@@ -74,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcribingTitle: String?
     private var isTranscribing: Bool { transcribingTitle != nil }
     private var transcribeChain: Task<Void, Never>?
+    private var compressionTask: Task<Void, Never>?
     private var queuedTranscriptions = 0
 
     // Live transcription progress (0–100). Updated from the Transcriber's
@@ -144,8 +154,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Recovery before pruning: an interrupted recording has no
         // transcript yet, and pruning must see it as the finished slot it
         // is about to become, not as stale audio.
+        Outbox.removeCompressionTemporaryFiles()
         recoverInterruptedRecordings()
         Outbox.pruneOldRecordings(keepDays: Config.recordingsKeepDays())
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard session.isRunning || stopTask != nil || compressionTask != nil else { return .terminateNow }
+        guard !terminationReplyPending else { return .terminateLater }
+
+        terminationReplyPending = true
+        let pendingStop = session.isRunning || stopTask != nil ? beginStoppingRecording() : nil
+        let pendingCompression = compressionTask
+        Task { @MainActor [self] in
+            await pendingStop?.value
+            await pendingCompression?.value
+            replyToTerminationRequest(timedOut: false)
+        }
+        terminationDeadlineTask = Task { @MainActor [self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.terminationDeadlineNanoseconds)
+            } catch {
+                return
+            }
+            replyToTerminationRequest(timedOut: true)
+        }
+        return .terminateLater
+    }
+
+    private func replyToTerminationRequest(timedOut: Bool) {
+        guard terminationReplyPending else { return }
+        terminationReplyPending = false
+        if timedOut {
+            appLog.error("quit: recording stop did not finish within 15s; terminating with recoverable raw audio")
+        }
+        terminationDeadlineTask?.cancel()
+        terminationDeadlineTask = nil
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     /// Takes an exclusive, non-blocking flock on outbox/.lock. .heldByOther
@@ -196,9 +241,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// partial CAFs are readable as-is, so finish the slot: stamp ended_at
     /// from the capture files' modification time and transcribe + deliver
     /// it like any other recording. Nothing recorded is ever left to rot.
-    private func recoverInterruptedRecordings() {
+    private func recoverInterruptedRecordings(
+        only slugs: Set<String>? = nil,
+        scheduleRecentRetry: Bool = true
+    ) {
         let fm = FileManager.default
+        var tooRecent: Set<String> = []
         for slot in Outbox.listSlots() {
+            if let slugs, !slugs.contains(slot.slug) { continue }
+            if session.slot?.slug == slot.slug {
+                appLog.notice("recovery: leaving live recording \(slot.slug, privacy: .public) alone")
+                continue
+            }
             guard let meta = try? Outbox.readMeta(from: slot.metaURL), meta.ended_at == nil,
                   !meta.isSingleStream else { continue }
             let captures = [slot.micAudioURL, slot.systemAudioURL].filter { fm.fileExists(atPath: $0.path) }
@@ -211,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let idle = Date().timeIntervalSince(endedAt)
             if idle < 60 {
                 appLog.notice("recovery: skipping \(slot.slug, privacy: .public), capture modified \(Int(idle), privacy: .public)s ago")
+                tooRecent.insert(slot.slug)
                 continue
             }
             do {
@@ -229,6 +284,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
             startTranscription(slot: slot, title: meta.title)
+        }
+        if scheduleRecentRetry, !tooRecent.isEmpty {
+            recoveryRetryTask?.cancel()
+            let retrySlugs = tooRecent
+            recoveryRetryTask = Task { @MainActor [self] in
+                do {
+                    try await Task.sleep(nanoseconds: 65_000_000_000)
+                } catch {
+                    return
+                }
+                recoveryRetryTask = nil
+                recoverInterruptedRecordings(only: retrySlugs, scheduleRecentRetry: false)
+            }
         }
     }
 
@@ -772,10 +840,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func stopRecording() {
-        Task { @MainActor in
+        _ = beginStoppingRecording()
+    }
+
+    private func beginStoppingRecording() -> Task<Void, Never> {
+        if let stopTask { return stopTask }
+        let task = Task { @MainActor [self] in
             guard !isStopping else { return }
             isStopping = true
-            defer { isStopping = false }
+            defer {
+                isStopping = false
+                stopTask = nil
+            }
             // Capture title before stop() clears session.meta.
             let title = session.meta?.title ?? "untitled"
             do {
@@ -787,6 +863,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 refreshStatusItem()
             }
         }
+        stopTask = task
+        return task
     }
 
     private static func transcribingLabel(_ title: String, pct: Int) -> String {
@@ -882,11 +960,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // current one — it stays in the Recordings menu.
             if !session.isRunning { NSWorkspace.shared.open(slot.transcriptURL) }
             await deliverPending(slot: slot)
-            // Audio is no longer needed losslessly — compress the raw
-            // .caf to m4a (and drop the originals) in the background so
-            // the UI returns to idle promptly. Re-transcription reads the
-            // compressed file transparently.
-            Task.detached { await Outbox.compressAudio(slot) }
+            // Compression is the final serialized queue step. A queued
+            // re-transcription cannot resolve/read the raw .caf until this
+            // has either replaced it with a validated m4a or left it intact.
+            let task = Task { await Outbox.compressAudio(slot) }
+            compressionTask = task
+            await task.value
+            compressionTask = nil
         } catch {
             presentError("Transcription failed.", error: error)
             // .caf files remain on disk for a manual retry. Future

@@ -76,7 +76,9 @@ enum AudioExport {
 
     /// Transcode a whole file to AAC-in-m4a — used to compress retained
     /// captures (.caf → .m4a, ~10–20× smaller) once they're no longer needed
-    /// in lossless form. Overwrites the destination.
+    /// in lossless form. The export lands in a same-directory .part file and
+    /// is renamed only after AVFoundation reports success, so interruption
+    /// can never leave a truncated destination shadowing the raw capture.
     static func transcodeToM4A(source: URL, destination: URL) async throws {
         try await export(asset: AVURLAsset(url: source), to: destination, timeRange: nil)
     }
@@ -102,6 +104,9 @@ enum AudioExport {
         to outURL: URL,
         timeRange: CMTimeRange?
     ) async throws {
+        let fm = FileManager.default
+        let partURL = outURL.appendingPathExtension("part")
+        try? fm.removeItem(at: partURL)
         guard let session = AVAssetExportSession(
             asset: asset,
             presetName: AVAssetExportPresetAppleM4A
@@ -109,10 +114,15 @@ enum AudioExport {
             throw AudioExportError.sessionCreationFailed
         }
         if let timeRange { session.timeRange = timeRange }
-        try? FileManager.default.removeItem(at: outURL)
         do {
-            try await session.export(to: outURL, as: .m4a)
+            try await session.export(to: partURL, as: .m4a)
+            if fm.fileExists(atPath: outURL.path) {
+                _ = try fm.replaceItemAt(outURL, withItemAt: partURL)
+            } else {
+                try fm.moveItem(at: partURL, to: outURL)
+            }
         } catch {
+            try? fm.removeItem(at: partURL)
             throw AudioExportError.exportFailed(underlying: error)
         }
     }

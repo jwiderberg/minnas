@@ -115,6 +115,9 @@ of a meeting while the menubar keeps saying "recording". The rules:
   `recoverInterruptedRecordings` finishes any slot with raw .caf files and no
   ended_at, alerts, and transcribes it. `capture_health` in meta.json records
   restarts, padded seconds and captured seconds per stream.
+- Quit runs the normal asynchronous stop path before terminating, so capture
+  writers are finalized, `ended_at` is persisted, and transcription is
+  queued; AppKit waits at most 15 seconds before allowing termination.
 - **Test any change to `MicCapture`, `SystemAudioCapture` or
   `SystemAudioTapCapture` with a real run from inside the bundle before
   relaunching the app**: `--mic-test 30 /tmp/x.caf` / `--system-test` /
@@ -134,7 +137,12 @@ of a meeting while the menubar keeps saying "recording". The rules:
   alert). A second instance would otherwise "recover" the live recording and
   `compressAudio` would unlink the .caf being written.
 - **Recovery before pruning**, and recovery skips slots whose newest .caf is
-  < 60 s old.
+  < 60 s old. Skipped slots get one recovery re-check after 65 seconds,
+  unless that slug is the current live session.
+- **Compression stays on the serialized transcription queue**, validates
+  before removing raw audio, exports through same-directory `.m4a.part`
+  files followed by rename, and launch removes stale sidecars. Quit waits up
+  to its 15-second deadline for compression already in flight.
 - **Pruning** (`Outbox.pruneOldRecordings` / `pruneAction`) ages by the slot
   directory's creation date (then `transcribed_at`, then `started_at`), never
   removes a slot an active sink still owes, never removes audio that hasn't
