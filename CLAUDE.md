@@ -118,6 +118,11 @@ of a meeting while the menubar keeps saying "recording". The rules:
 - Quit runs the normal asynchronous stop path before terminating, so capture
   writers are finalized, `ended_at` is persisted, and transcription is
   queued; AppKit waits at most 15 seconds before allowing termination.
+- Quitting while only transcription is active asks for confirmation; Quit
+  leaves the finished slot to resume on the next launch, while Cancel keeps
+  the app running. Launch recovery then queues finished slots with audio but
+  no transcript/provenance before pruning, oldest first, and stops
+  auto-retrying one after three failures. A finished recording with only one surviving stream is transcribed from that stream instead of failing on the missing one.
 - **Test any change to `MicCapture`, `SystemAudioCapture` or
   `SystemAudioTapCapture` with a real run from inside the bundle before
   relaunching the app**: `--mic-test 30 /tmp/x.caf` / `--system-test` /

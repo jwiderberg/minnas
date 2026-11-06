@@ -77,8 +77,14 @@ enum TranscriptionJob {
         // pass: halves the work and avoids duplicated Me/Them turns.
         let micAudio = slot.micAudioReadURL
         let systemAudio = slot.systemAudioReadURL
-        let duplicate = AudioDuplication.systemDuplicatesMic(mic: micAudio, system: systemAudio)
-        let streams = duplicate ? [micAudio] : [micAudio, systemAudio]
+        let fm = FileManager.default
+        let hasMic = fm.fileExists(atPath: micAudio.path)
+        let hasSystem = fm.fileExists(atPath: systemAudio.path)
+        let duplicate = hasMic && hasSystem
+            && AudioDuplication.systemDuplicatesMic(mic: micAudio, system: systemAudio)
+        var streams: [URL] = []
+        if hasMic { streams.append(micAudio) }
+        if hasSystem && !duplicate { streams.append(systemAudio) }
         // One dominant language across both streams is the STARTING point;
         // each stream then re-checks per chunk (a Swedish stretch inside an
         // English meeting, or vice versa). An explicit pin skips all that.
@@ -86,13 +92,17 @@ enum TranscriptionJob {
         let policy = LanguagePolicy.current(attendees: meta.attendees)
         let start = (try? await Transcriber.shared.resolveLanguage(forStreams: streams, model: model, policy: policy)) ?? nil
 
-        let micResults = try await Transcriber.shared.transcribe(
+        let micResults: [STTResult] = hasMic ? try await Transcriber.shared.transcribe(
             audioPath: micAudio.path, model: model, language: pinned, startLanguage: start, policy: policy,
-            onProgress: onProgress.map { cb in { @Sendable f in cb(duplicate ? f : f * 0.5 * sttShare) } }
-        )
-        var systemResults: [STTResult] = duplicate ? [] : try await Transcriber.shared.transcribe(
+            onProgress: onProgress.map { cb in
+                { @Sendable f in cb(hasSystem && !duplicate ? f * 0.5 * sttShare : f) }
+            }
+        ) : []
+        var systemResults: [STTResult] = !hasSystem || duplicate ? [] : try await Transcriber.shared.transcribe(
             audioPath: systemAudio.path, model: model, language: pinned, startLanguage: start, policy: policy,
-            onProgress: onProgress.map { cb in { @Sendable f in cb((0.5 + f * 0.5) * sttShare) } }
+            onProgress: onProgress.map { cb in
+                { @Sendable f in cb(hasMic ? (0.5 + f * 0.5) * sttShare : f * sttShare) }
+            }
         )
         if diarize && !duplicate && !systemResults.isEmpty {
             systemResults = await labelSpeakers(systemResults, audio: systemAudio, onProgress: onProgress.map { cb in { @Sendable f in cb(sttShare + f * (1 - sttShare)) } })
@@ -166,6 +176,7 @@ enum TranscriptionJob {
             // (e.g. a cloud diarize rerun over a local transcript).
             if !output.languages.isEmpty { m.languages_detected = output.languages }
             m.transcription = provenance
+            m.transcription_failures = nil
             m.transcript_written_at = writtenAt
             // New transcript content supersedes every prior delivery: each
             // sink re-delivers, and the folder sink overwrites its old file

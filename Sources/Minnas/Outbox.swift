@@ -91,6 +91,9 @@ struct RecordingMeta: Codable, Sendable {
     var audio_retained: Bool = true
     // Set after each (re-)transcription.
     var transcription: TranscriptionProvenance?
+    // Consecutive failed transcription attempts. Launch retry stops after
+    // three so a permanently bad slot cannot loop on every app start.
+    var transcription_failures: Int?
     // When TranscriptionJob.finish began writing this generation's
     // transcript.md (stamped before it is written, saved in meta.json only
     // after it is). SinkDispatcher refuses to deliver a file older than

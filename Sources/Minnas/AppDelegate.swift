@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcribingTitle: String?
     private var isTranscribing: Bool { transcribingTitle != nil }
     private var transcribeChain: Task<Void, Never>?
+    private var queuedTranscriptionTitleForQuit: String?
     private var compressionTask: Task<Void, Never>?
     private var queuedTranscriptions = 0
 
@@ -155,11 +156,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // transcript yet, and pruning must see it as the finished slot it
         // is about to become, not as stale audio.
         Outbox.removeCompressionTemporaryFiles()
-        recoverInterruptedRecordings()
+        let recoveredSlugs = recoverInterruptedRecordings()
+        resumeUntranscribedRecordings(excluding: recoveredSlugs)
         Outbox.pruneOldRecordings(keepDays: Config.recordingsKeepDays())
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if !session.isRunning, stopTask == nil,
+           transcribingTitle != nil || transcribeChain != nil {
+            let title = transcribingTitle ?? queuedTranscriptionTitleForQuit ?? "Recording"
+            let alert = NSAlert()
+            alert.messageText = "A transcription is running"
+            alert.informativeText = "\"\(title)\" is still being transcribed. It will continue at the next launch."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        }
         guard session.isRunning || stopTask != nil || compressionTask != nil else { return .terminateNow }
         guard !terminationReplyPending else { return .terminateLater }
 
@@ -241,12 +255,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// partial CAFs are readable as-is, so finish the slot: stamp ended_at
     /// from the capture files' modification time and transcribe + deliver
     /// it like any other recording. Nothing recorded is ever left to rot.
+    @discardableResult
     private func recoverInterruptedRecordings(
         only slugs: Set<String>? = nil,
         scheduleRecentRetry: Bool = true
-    ) {
+    ) -> Set<String> {
         let fm = FileManager.default
         var tooRecent: Set<String> = []
+        var queuedSlugs: Set<String> = []
         for slot in Outbox.listSlots() {
             if let slugs, !slugs.contains(slot.slug) { continue }
             if session.slot?.slug == slot.slug {
@@ -284,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
             startTranscription(slot: slot, title: meta.title)
+            queuedSlugs.insert(slot.slug)
         }
         if scheduleRecentRetry, !tooRecent.isEmpty {
             recoveryRetryTask?.cancel()
@@ -297,6 +314,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 recoveryRetryTask = nil
                 recoverInterruptedRecordings(only: retrySlugs, scheduleRecentRetry: false)
             }
+        }
+        return queuedSlugs
+    }
+
+    /// Resume slots that reached a clean stop but never finished writing a
+    /// transcript (for example, because the app quit during transcription).
+    /// Recovery has already stamped interrupted captures, and pruning runs
+    /// only after these jobs have been queued.
+    private func resumeUntranscribedRecordings(excluding excludedSlugs: Set<String> = []) {
+        let fm = FileManager.default
+        var candidates: [(slot: OutboxSlot, meta: RecordingMeta)] = []
+        for slot in Outbox.listSlots() where !excludedSlugs.contains(slot.slug) {
+            guard session.slot?.slug != slot.slug,
+                  let meta = try? Outbox.readMeta(from: slot.metaURL),
+                  meta.ended_at != nil,
+                  meta.transcription == nil,
+                  !fm.fileExists(atPath: slot.transcriptURL.path) else { continue }
+            let hasMic = fm.fileExists(atPath: slot.micAudioReadURL.path)
+            let hasSystem = fm.fileExists(atPath: slot.systemAudioReadURL.path)
+            guard meta.isSingleStream ? hasSystem : (hasMic || hasSystem) else { continue }
+            candidates.append((slot, meta))
+        }
+        candidates.sort {
+            if $0.meta.started_at != $1.meta.started_at {
+                return $0.meta.started_at < $1.meta.started_at
+            }
+            return $0.slot.slug < $1.slot.slug
+        }
+        for candidate in candidates {
+            let failures = candidate.meta.transcription_failures ?? 0
+            if failures >= 3 {
+                appLog.notice("transcription resume: skipping \(candidate.slot.slug, privacy: .public) after \(failures, privacy: .public) failures")
+                continue
+            }
+            appLog.notice("transcription resume: queued \(candidate.slot.slug, privacy: .public) (\(candidate.meta.title, privacy: .public))")
+            startTranscription(slot: candidate.slot, title: candidate.meta.title)
         }
     }
 
@@ -910,6 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title: String,
         model: TranscriptionModel? = nil
     ) async {
+        queuedTranscriptionTitleForQuit = title
         // Resolved when the job is queued, so a settings change while it
         // waits doesn't switch engines under it.
         let model = model ?? Config.defaultModel()
@@ -925,7 +979,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         transcribeChain = job
         await job.value
-        if transcribeChain == job { transcribeChain = nil }
+        if transcribeChain == job {
+            transcribeChain = nil
+            queuedTranscriptionTitleForQuit = nil
+        }
     }
 
     /// One job: drives the "Transcribing" menubar state for its duration.
@@ -968,6 +1025,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await task.value
             compressionTask = nil
         } catch {
+            do {
+                try Outbox.mutateMeta(slot) {
+                    $0.transcription_failures = ($0.transcription_failures ?? 0) + 1
+                }
+            } catch {
+                appLog.error("transcription: couldn't record failure for \(slot.slug, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
             presentError("Transcription failed.", error: error)
             // .caf files remain on disk for a manual retry. Future
             // commit: add "Retry transcription" menu entry that
