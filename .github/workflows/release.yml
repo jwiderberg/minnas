@@ -56,10 +56,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      KEYCHAIN: ${{ runner.temp }}/release.keychain-db
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The throwaway keychain lives outside the workspace. `runner.temp` is
+      # not available in a job-level env, so it is exported from a step.
+      - name: Keychain path
+        run: echo "KEYCHAIN=$RUNNER_TEMP/release.keychain-db" >> "$GITHUB_ENV"
 
       - name: Select Xcode 26
         run: |
