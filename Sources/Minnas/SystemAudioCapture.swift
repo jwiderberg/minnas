@@ -39,7 +39,7 @@ enum SystemAudioCaptureError: Error {
 
 /// One-shot latch for stop()'s finishWriting-versus-deadline race: the first
 /// claim() wins and resumes the continuation, the other side does nothing.
-private final class FinishLatch: Sendable {
+final class FinishLatch: Sendable {
     private let claimed = Atomic<Bool>(false)
     func claim() -> Bool { !claimed.exchange(true, ordering: .acquiringAndReleasing) }
 }

@@ -230,6 +230,10 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     private let writerFailed = Atomic<Bool>(false)
     /// stop()'s finishWriting missed its deadline; the writer was abandoned.
     private let writerTimedOut = Atomic<Bool>(false)
+    /// Outer bound on stop()'s hop onto writeQueue: longer than the 10 s
+    /// finishWriting wait inside finishOnWriteQueue so that wait normally
+    /// wins; this one only fires when the queue itself is stuck.
+    static let stopDeadline: Double = 15
     private let paddedBits = Atomic<UInt64>(0)
     private let suspect = Atomic<Bool>(false)
 
@@ -364,7 +368,26 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             // once this engine is discarded.
             tapLog.error("stop: tap/aggregate could not be fully released (see the destroy errors above)")
         }
-        await onWrite { self.finishOnWriteQueue() }
+        // Bounded hop onto writeQueue. If the queue itself is wedged (an
+        // append that never returns), the finish closure never starts and
+        // the 10 s wait inside it never arms, so race the hop against a
+        // deadline from a global queue; whoever claims the latch first
+        // resumes stop(). A finish that lands later still runs on the
+        // queue and finalises the file.
+        let latch = FinishLatch()
+        let finishedInTime: Bool = await withCheckedContinuation { cont in
+            writeQueue.async {
+                self.finishOnWriteQueue()
+                if latch.claim() { cont.resume(returning: true) }
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.stopDeadline) {
+                if latch.claim() { cont.resume(returning: false) }
+            }
+        }
+        if !finishedInTime {
+            writerTimedOut.store(true, ordering: .relaxed)
+            tapLog.error("stop: the write queue did not run the finish within \(Int(Self.stopDeadline), privacy: .public) s; abandoning the writer")
+        }
         tapLog.notice("stop: cycles=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(self.writerTimedOut.load(ordering: .relaxed), privacy: .public) permissionSuspect=\(self.permissionSuspect, privacy: .public)")
     }
 
@@ -788,8 +811,11 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         // The handler holds the writer until AVFoundation is done with it, so
         // a finish that lands after the deadline still finalises the file.
         nonisolated(unsafe) let keepAlive = writer
-        writer.finishWriting { [self] in
-            if self.writerTimedOut.load(ordering: .relaxed) {
+        // Atomic is non-copyable, so the flag is read through a weak self:
+        // the handler must not keep the whole capture object (and its ring)
+        // alive if AVFoundation never calls back.
+        writer.finishWriting { [weak self] in
+            if self?.writerTimedOut.load(ordering: .relaxed) == true {
                 tapLog.notice("finishWriting completed after the deadline (writer status \(keepAlive.status.rawValue, privacy: .public))")
             }
             done.signal()
