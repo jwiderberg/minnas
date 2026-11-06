@@ -25,17 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Swift 6.2 or newer comes with Xcode 26. Select it only if the image
-      # ships it as a non-default Xcode.
+      # Swift 6.2 or newer comes with Xcode 26. The image carries it as a
+      # non-default install; the job fails if it is not there, the same as
+      # release.yml, so a green build always means Swift 6.2.
       - name: Select Xcode 26
         run: |
-          if ls /Applications | grep -q '^Xcode_26'; then
-            XCODE="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
-            echo "Selecting $XCODE"
-            sudo xcode-select -s "$XCODE"
-          else
-            echo "No Xcode_26*.app in /Applications; using the default toolchain"
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -z "$XCODE" ]]; then
+            echo "::error::no Xcode_26*.app on this runner image; the build needs Swift 6.2"
+            ls /Applications | grep -i xcode || true
+            exit 1
           fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version | grep -E '^Xcode 26([.]|$)'
 
       - name: Swift version
         run: swift --version
