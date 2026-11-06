@@ -2,46 +2,113 @@
 
 Total recall for your meetings.
 
-Minnas is a Mac menubar app. It records your meetings, turns the speech into text on your Mac, and saves the result as Markdown in a folder you choose. "Minnas" is Swedish for "to remember".
+Minnas is a Mac menubar app that records your meetings, transcribes them on
+the Mac itself, and drops the result as a Markdown file into a folder you
+pick. "Minnas" is Swedish for "to remember".
 
 ## Why
 
-I built Minnas because three things about meeting notes wore me down.
+My work happens on other people's platforms. One client is on Teams, one
+on Zoom, others on Meet, and each of them has a different idea about
+note-taking. Three things about that wore me down, and this app is what
+came out of it.
 
-**Bots joining calls.** Note-taking services kept adding a bot to my meetings. Other people's bots kept showing up too. Now there is pushback from many sides. Otter.ai was hit with a class action in August 2025. The person who sued never had an account. Another attendee's bot recorded them ([NPR](https://www.npr.org/2025/08/15/g-s1-83087/otter-ai-transcription-class-action-lawsuit)). The University of Washington blocked Read AI from its Zoom and Teams. The bot joined meetings that its own users were not in ([UW-IT](https://it.uw.edu/guides/security-authentication/read-ai-deactivation/)). Microsoft Teams now puts unregistered bots in a "Suspected threats" lobby. The organizer must confirm before one gets in ([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/)). Google Meet also tags third-party bots when they try to join ([UC Today](https://www.uctoday.com/security-compliance-risk/google-meet-launches-update-to-better-screen-suspicious-bots/)). A bot is a stranger in the room. The audio is already on my Mac. I wanted to record it there.
+The bots were the first thing. Every note-taking service I tried worked by
+joining the meeting as a participant, and the ones other people used would
+join mine, sometimes for meetings their owner wasn't even attending. It
+turns out I'm not the only one who found that creepy. In August 2025
+Otter.ai was sued by a man who had never had an Otter account; another
+attendee's bot had recorded him on a Zoom call
+([NPR](https://www.npr.org/2025/08/15/g-s1-83087/otter-ai-transcription-class-action-lawsuit)).
+The University of Washington blocked Read AI from its Zoom and Teams because
+the bot was sitting in meetings its own users had skipped
+([UW-IT](https://it.uw.edu/guides/security-authentication/read-ai-deactivation/)).
+Teams has since started dumping unregistered bots into a lobby bucket
+labelled "Suspected threats" and making the organiser confirm each one
+([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/)),
+and Meet now tags third-party bots at the door
+([UC Today](https://www.uctoday.com/security-compliance-risk/google-meet-launches-update-to-better-screen-suspicious-bots/)).
+What bothered me most is that none of this is necessary. The audio is
+already coming out of my Mac's speakers. There's nothing to join.
 
-**Hardware tied to subscriptions.** AI recorders avoid the bot problem. They sell you a device, then charge for transcription. A Plaud device includes 300 transcription minutes a month on the free plan. After that it costs $8.33 a month for Pro or $20 a month for Unlimited, billed yearly. Monthly rates cost more ([Plaud pricing](https://www.plaud.ai/pages/plaud-ai-plan-pricing)). The minutes are what you pay for. Your audio lives on their servers. The device is just a way into the plan. An Apple silicon Mac already runs Whisper well. It should not need a subscription for that.
+Then the hardware. The AI recorders avoid the bot problem by giving you a
+physical device, and then they meter the thing you bought it for. A Plaud
+comes with 300 transcription minutes a month; past that you're on a plan,
+$8.33 a month for Pro or $20 for Unlimited if you pay yearly, more if you
+pay monthly
+([Plaud pricing](https://www.plaud.ai/pages/plaud-ai-plan-pricing)).
+The audio goes to their servers and the gadget is really a key to the
+subscription. Meanwhile the laptop I'm recording on has a Neural Engine that
+runs Whisper comfortably. I didn't see why I should rent that capability
+back.
 
-**Work spread across Teams, Zoom and Meet.** Each client uses a different platform. Okta's Businesses at Work data shows how much they overlap. In the 2022 report, 45% of its Microsoft 365 customers also used Zoom ([Zoom's summary of the report](https://www.zoom.com/en/blog/zoom-okta-2022-businesses-at-work-report/)). Each platform's built-in notes need their own license and stay in their own silo. Teams intelligent recap needs a Teams Premium or Microsoft 365 Copilot license ([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)). Meet's "Take notes for me" needs a Gemini or AI Meetings add-on on the organizer's account. As a guest, you get nothing ([Google Meet help](https://support.google.com/meet/answer/14754931)). I wanted one folder of Markdown files, with one file per meeting, no matter which app the meeting used.
+And the platforms. Okta's Businesses at Work report found that 45% of its
+Microsoft 365 customers also ran Zoom
+([Zoom's summary of the 2022 report](https://www.zoom.com/en/blog/zoom-okta-2022-businesses-at-work-report/)),
+which matches my experience: nobody is on one platform, and each platform's
+own notes feature only works inside that platform, with its own licence.
+Teams' intelligent recap needs Teams Premium or a Microsoft 365 Copilot seat
+([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)).
+Meet's "Take notes for me" needs a Gemini or AI Meetings add-on on the
+organiser's account, and if you're a guest in someone else's meeting you get
+nothing at all
+([Google Meet help](https://support.google.com/meet/answer/14754931)).
+I wanted one folder of Markdown files, one per meeting, regardless of whose
+software the meeting ran on.
 
-So Minnas is a menubar app. It records what your Mac plays and what your microphone hears. It transcribes on the Neural Engine and writes plain files. No bot. No device. No plan.
+So Minnas records whatever the Mac is playing and whatever the microphone
+hears, transcribes it on the Neural Engine, and writes a file. That's the
+whole idea.
 
 ## What it does
 
-- **No bot joins your call.** It captures the audio your Mac plays and the audio your microphone hears. It works with Zoom, Teams, Meet, or anything else that makes sound.
-- **Local first.** Transcription runs on the Apple Neural Engine using [WhisperKit](https://github.com/argmaxinc/WhisperKit). It also tells speakers apart on the device, using a diarization model from [FluidAudio](https://github.com/FluidInference/FluidAudio).
-- **Two tracks.** Your microphone and the other people are recorded and transcribed separately. So "Me" and "Them" are known, not guessed. When several people on the remote side speak, that side is split into "Them (A)" and "Them (B)".
-- **Plain files.** Each meeting becomes a Markdown file. You pick the folder. It can be a notes vault, a synced folder, or anywhere else.
-- **Optional cloud transcription** with your own OpenAI key. Use it if you want better accuracy. The audio is uploaded for that recording.
-- **Calendar prompts** a few minutes before a meeting that has an online meeting link. It uses Apple's calendar framework (EventKit), so any calendar account set up on the Mac works. It is off until you turn it on.
-- **Voice Memos import** for iPhone memos synced through iCloud. The list updates as memos arrive. The Mac gets them only while Voice Memos is running. So the import window's "Sync from iCloud" button opens Voice Memos in the background. **Transcribe Audio File…** works on any recording made somewhere else.
-- **Language detection** happens for each recording. It picks from the languages you list. English is the default. You can add others, such as Swedish, in Settings. If the language changes during a meeting, it switches.
+- Nothing joins your call. Minnas captures the audio your Mac plays and the
+  audio your microphone hears, so Zoom, Teams, Meet, FaceTime, a browser
+  tab, all look the same to it.
+- Transcription runs on the Apple Neural Engine with
+  [WhisperKit](https://github.com/argmaxinc/WhisperKit). Speakers are told
+  apart on the device too, with an on-device diarization model from
+  [FluidAudio](https://github.com/FluidInference/FluidAudio).
+- Your microphone and the other participants are recorded and transcribed as
+  separate tracks, so "Me" and "Them" are known rather than guessed. When
+  several people speak on the far side it's split further into "Them (A)",
+  "Them (B)" and so on.
+- Each meeting becomes a Markdown file in a folder of your choice. A notes
+  vault, a synced folder, wherever.
+- If you want higher accuracy and don't mind that one recording's audio is
+  uploaded, you can add your own OpenAI key and transcribe in the cloud.
+- A calendar prompt a few minutes before any meeting that has an online
+  meeting link. It uses Apple's EventKit, so whatever calendar accounts the
+  Mac already has will work. Off until you turn it on.
+- Import of iPhone Voice Memos synced through iCloud. The list updates as
+  memos arrive. The Mac only receives them while Voice Memos is running, so
+  the import window's "Sync from iCloud" button opens it in the background.
+  There's also "Transcribe Audio File…" for a recording made somewhere else.
+- The language is detected per recording from the languages you list
+  (English by default; add Swedish, or whatever else you speak, in
+  Settings), and it switches mid-meeting when the language does.
 
 ## Requirements
 
-- macOS 15 or newer, on Apple silicon.
-- Xcode 26 (Swift 6.2 or newer) to build. The Command Line Tools alone work only if they are the 26 release. Check with `swift --version`.
-- About 3 GB of free disk space for the speech models, plus space for your audio.
+- macOS 15 or newer on Apple silicon.
+- Xcode 26 (Swift 6.2 or newer) to build. The Command Line Tools on their
+  own are enough only if they're the 26 release. `swift --version` tells you.
+- About 3 GB of free disk for the speech models, plus room for your audio.
 
 ## Install
 
 ### Download
 
-Each [release](https://github.com/jwiderberg/minnas/releases) includes a `Minnas-<version>.zip`. GitHub Actions builds it from the tagged commit. It is signed with a Developer ID certificate and notarized by Apple, so it opens without a Gatekeeper warning. Unzip it, move Minnas.app to /Applications, and open it. [Verify a download](#verify-a-download) explains how to check what you got.
+Each [release](https://github.com/jwiderberg/minnas/releases) carries a
+`Minnas-<version>.zip` that GitHub Actions built from the tagged commit,
+signed with a Developer ID certificate and notarized by Apple, so it opens
+without a Gatekeeper warning. Unzip it, move Minnas.app to /Applications,
+open it. [Verify a download](#verify-a-download) explains how to check what
+you got.
 
 ### Build from source
 
-Or build it yourself from a clone you can read:
+Or build it yourself, from a clone you can read:
 
 ```sh
 git clone https://github.com/jwiderberg/minnas.git
@@ -49,28 +116,46 @@ cd minnas
 bash scripts/install.sh
 ```
 
-Add `--dry-run` first to see every step without changing anything. Other flags: `--no-identity`, `--dest <dir>`, `--no-launch`.
+Add `--dry-run` first if you want to see every step before anything changes.
+Other flags: `--no-identity`, `--dest <dir>`, `--no-launch`.
 
 What the script does, in order:
 
-1. Checks the macOS version (against `LSMinimumSystemVersion` in `App/Info.plist`, currently 15.0) and Apple silicon.
-2. Checks that Swift 6.2 or newer is installed. If not, it tells you what to install.
-3. Runs `swift build -c release`. The first build downloads dependencies through SwiftPM.
-4. Offers to create a local code-signing identity (see below). It asks `Create the local signing identity? [y/N]`.
-5. Runs `scripts/make-app.sh` to build and sign `Minnas.app`.
-6. Copies it to `/Applications`. If that is not writable, it uses `~/Applications`. You can also pass a folder with `--dest`. It asks before replacing an existing copy.
-7. Launches it, unless you pass `--no-launch`.
-8. Prints the permission prompts to expect. It quotes the explanation each one shows, taken from the usage strings in `App/Info.plist`.
+1. Checks the macOS version (against `LSMinimumSystemVersion` in
+   `App/Info.plist`, currently 15.0) and that this is Apple silicon.
+2. Checks that Swift 6.2 or newer is installed, and tells you what to install
+   if not.
+3. Runs `swift build -c release`. The first build downloads dependencies
+   through SwiftPM.
+4. Offers to create a local code-signing identity (see below), asking
+   `Create the local signing identity? [y/N]`.
+5. Runs `scripts/make-app.sh` to assemble and sign `Minnas.app`.
+6. Copies it to `/Applications` (or `~/Applications` if that isn't writable,
+   or wherever you said with `--dest`). It asks before replacing an existing
+   copy.
+7. Launches it, unless you passed `--no-launch`.
+8. Prints the permission prompts to expect, quoting the explanation each one
+   shows (the usage strings in `App/Info.plist`).
 
-It never uses `sudo`. It makes no network requests of its own.
+It never uses `sudo` and makes no network requests of its own.
 
-**The signing identity.** macOS remembers your microphone and recording permissions by the app's code signature. A build without a stable signature gets a new one each time. So macOS asks again after every rebuild. The identity ("Minnas Dev") is one self-signed certificate and key in your login keychain. Nobody else trusts it. It only signs builds made on this Mac. Say no, or pass `--no-identity`, if you prefer not to create it. In that case, expect to grant permissions again after each rebuild.
+About the signing identity: macOS remembers your microphone and recording
+permissions by the app's code signature. A build without a stable signature
+gets a new one each time, so macOS asks you again after every rebuild, which
+gets old fast. The identity ("Minnas Dev") is a single self-signed
+certificate and key in your login keychain. Nobody else trusts it and it
+only signs builds made on this Mac. Say no, or pass `--no-identity`, if
+you'd rather not have it, and expect to re-grant permissions after each
+rebuild.
 
-A source build and a downloaded release are signed by different certificates. So macOS keeps separate permission grants for each. Use one or the other. If you switch, you must grant permissions again.
+A source build and a downloaded release are signed by different
+certificates, so macOS keeps separate permission grants for them. Pick one.
+If you switch, you'll be granting again.
 
 ### Verify a download
 
-Each check proves one thing. The first two need the [GitHub CLI](https://cli.github.com). The last two come built into macOS.
+Each check proves one thing. The first two need the
+[GitHub CLI](https://cli.github.com); the last two are built into macOS.
 
 ```sh
 shasum -a 256 -c Minnas-<version>.zip.sha256         # the file is intact
@@ -81,7 +166,12 @@ spctl --assess --type execute -vv Minnas.app          # "accepted source=Notariz
 codesign -dvv Minnas.app 2>&1 | grep TeamIdentifier   # the Team ID shown in the release notes
 ```
 
-The attestation links the binary to public source code. Notarization means Apple scanned the app and the signer holds a Developer ID. Neither one proves the source is harmless. Read the code yourself. Read `Package.resolved` to see what it pulls in. The release notes list the SHA-256 and the Team ID. See [SECURITY.md](SECURITY.md#releases) for how releases are built and what a compromise would look like.
+The attestation ties the binary to public source. Notarization says Apple
+scanned it and that the signer holds a Developer ID. Neither says anything
+about whether the source is harmless, so read it, and read
+`Package.resolved` for what it pulls in. The release notes carry the SHA-256
+and the Team ID. [SECURITY.md](SECURITY.md#releases) describes how releases
+are built and what a compromise would look like.
 
 ## Uninstall
 
@@ -90,35 +180,73 @@ bash scripts/uninstall.sh --dry-run   # preview
 bash scripts/uninstall.sh
 ```
 
-It removes the app. Then it asks separately, with the default set to no, before deleting the working data in Application Support (your recorded audio), the keychain item, the signing identity, and the permission grants. It never touches your transcripts folder.
+It removes the app, then asks separately (default no) before deleting the
+working data in Application Support (your recorded audio), the keychain item,
+the signing identity, and the permission grants. It never touches your
+transcripts folder.
 
 ## First run and permissions
 
-Minnas lives in the menu bar. It has no Dock icon. On first launch, a setup window asks where transcripts should go. It suggests `~/Documents/Minnas Transcripts`. It then walks you through the microphone and system-audio permissions. It also offers optional extras: an OpenAI key and the calendar. These are all the permissions it can ask for.
+Minnas lives in the menu bar and has no Dock icon. On first launch a setup
+window asks where transcripts should go (it suggests
+`~/Documents/Minnas Transcripts`), walks through the microphone and
+system-audio permissions, and offers the optional extras (an OpenAI key, the
+calendar). The table below is every permission it can ask for.
 
 | Permission | Why | When it is asked | Without it |
 | --- | --- | --- | --- |
 | Microphone | Your side of the meeting. | During setup, or the first time you start a recording. | Nothing can be recorded. |
-| System Audio Recording (the default capture engine) | The other participants' side, through a Core Audio process tap. Audio only. | The first time you start a recording. | Your microphone is still captured. The other side is empty, because the tap delivers silence. The app warns you when a track has been silent for 15 seconds. |
-| Screen Recording (only if you switch to the ScreenCaptureKit engine) | The same job, through ScreenCaptureKit. macOS files this under Screen Recording. Audio only. The screen is never captured. | The first recording after you switch. | As above. The app also alerts you if the stream cannot restart. |
-| Calendars (optional) | Prompts you before meetings. Names the other person in a 1:1. | When you choose "macOS Calendar" as the calendar source and press Grant Calendar Access (in setup, or in Settings > Calendar). | No prompts. You start recordings from the menu. |
-| Full Disk Access (optional) | Reads iPhone memos in the Voice Memos library. macOS never prompts for it. | The app appears, switched off, under System Settings > Privacy & Security > Full Disk Access after the first import attempt. | "Import Voice Memos" cannot read the library. Recording and file import still work. |
+| System Audio Recording (the default capture engine) | The other participants' side, through a Core Audio process tap. Audio only. | The first time you start a recording. | Your microphone is still captured, but the other side is empty (the tap delivers silence). The app warns when a track is silent after 15 seconds. |
+| Screen Recording (only if you switch to the ScreenCaptureKit engine) | The same, through ScreenCaptureKit, which macOS files under Screen Recording. Audio only; the screen is never captured. | The first recording after you switch. | As above; the app also alerts if the stream cannot be restarted. |
+| Calendars (optional) | Prompt you before meetings and name the other person in a 1:1. | When you choose "macOS Calendar" as the calendar source and press Grant Calendar Access (setup, or Settings > Calendar). | No prompts. You start recordings from the menu. |
+| Full Disk Access (optional) | Read iPhone memos in the Voice Memos library. macOS never prompts for it. | The app appears, switched off, under System Settings > Privacy & Security > Full Disk Access after the first import attempt. | "Import Voice Memos" cannot read the library. Recording and file import are unaffected. |
 
-Grant them in System Settings > Privacy & Security. Then relaunch the app. Settings > Permissions shows the status of each one.
+Grant them in System Settings > Privacy & Security, then relaunch the app.
+Settings > Permissions shows where each one stands.
 
-**Which capture engine.** The default engine (`systemAudioEngine` = `taps`) is a Core Audio process tap. It needs only the System Audio Recording permission. You can exclude apps by process. It does not trigger macOS's "is recording your screen" reminders. ScreenCaptureKit (`sck`) is the other option. You choose it in Settings > Transcription. Switch to it if the other side stays silent with the tap, even though System Audio Recording is granted. macOS cannot report that grant, so a silent tap is the only sign. You might also switch if you already granted Screen Recording and prefer it. ScreenCaptureKit needs Screen Recording.
+On the choice of capture engine: the default (`systemAudioEngine` = `taps`)
+is a Core Audio process tap. It needs only the System Audio Recording
+permission, can exclude apps you list by process, and doesn't set off the
+"is recording your screen" reminders macOS shows for screen capture.
+ScreenCaptureKit (`sck`) is the alternative, chosen in Settings >
+Transcription. Switch to it if the other side keeps coming out silent with
+the tap even though System Audio Recording is granted (macOS has no way to
+report that grant, so a silent tap is the only symptom you'll get), or if
+you've already granted Screen Recording and would rather keep using that.
+It needs Screen Recording.
 
 ## Where files live
 
-- **Transcripts folder.** The Markdown files go to the folder you pick in setup or in Settings > General (setting `transcriptsFolderPath`). Files are named `<yyyy-MM-dd HHmm> <title>.md`. Minnas only adds or updates files there. It never deletes anything in that folder. Neither does `scripts/uninstall.sh`. Until you choose a folder, transcripts stay in the working data below. After you choose one, every existing transcript is written to the folder within five minutes.
-- **Working data.** Audio, per-recording metadata (`meta.json`), and a local copy of each transcript live in `~/Library/Application Support/minnas/outbox/`. Each recording gets its own folder.
-- **Retention.** Recorded audio is deleted after 30 days by default (`recordingsKeepDays`). Set it to `0` to keep audio forever. The 30 days count from when the recording arrived. Until then, you can transcribe again with another model. Transcripts in your transcripts folder are never touched. When the audio is deleted, the outbox copy of a transcript that is already in your folder is removed too, along with its recording folder. A transcript that never reached a folder (because none was chosen) stays in the outbox. A recording whose transcript is still waiting to be written to the folder is kept whole. Raw captures are compressed to AAC after transcription.
-- **Models.** Speech models are cached in `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml`. Speaker models are cached in `~/Library/Application Support/FluidAudio/Models`.
-- **Secrets.** If you add an OpenAI key, it is stored in your login keychain. It is not stored in a file.
+- Transcripts. The Markdown files go to the folder you choose in setup or in
+  Settings > General (setting `transcriptsFolderPath`), named
+  `<yyyy-MM-dd HHmm> <title>.md`. Minnas only ever adds or updates files
+  there. It never deletes anything in that folder, and neither does
+  `scripts/uninstall.sh`. Until you've chosen a folder, transcripts stay in
+  the working data below; once you choose one, every existing transcript is
+  written out within five minutes.
+- Working data. Audio, the per-recording metadata (`meta.json`) and a local
+  copy of each transcript live in
+  `~/Library/Application Support/minnas/outbox/`, one folder per recording.
+- Retention. Recorded audio is deleted after 30 days by default
+  (`recordingsKeepDays`; `0` keeps it forever), counted from when the
+  recording arrived. Until then you can re-transcribe it with another model.
+  Transcripts in your transcripts folder are never touched. When the audio
+  goes, the outbox copy of a transcript that's already in your folder goes
+  with it; a transcript that never reached a folder (because none was
+  chosen) stays in the outbox. A recording whose transcript is still waiting
+  to be written to the folder is kept whole. Raw captures are compressed to
+  AAC after transcription.
+- Models. Speech models are cached under
+  `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml`, speaker
+  models under `~/Library/Application Support/FluidAudio/Models`.
+- Secrets. An OpenAI key, if you add one, is stored in your login keychain,
+  not in a file.
 
 ## Settings
 
-Change settings in the app (menu bar > Settings…). You can also reach every setting from the shell. Use the binary inside the app bundle. That way it reads the app's own settings and keychain:
+Change settings in the app (menu bar > Settings…). Every setting is also
+reachable from the shell through the binary inside the app bundle, which
+reads the app's own settings and keychain:
 
 ```sh
 MINNAS=/Applications/Minnas.app/Contents/MacOS/minnas
@@ -128,26 +256,64 @@ $MINNAS --settings set openAIKey -          # "-" reads the value from stdin
 $MINNAS --settings unset recordingsKeepDays
 ```
 
-An environment variable with the same name beats a stored setting. A stored setting beats a `.env` file. A `.env` file beats the default. `.env.example` lists every key. You do not need to set server addresses. The only network endpoint the app talks to is OpenAI's, fixed at `https://api.openai.com`.
+An environment variable of the same name wins over a stored setting, which
+wins over a `.env` file, which wins over the default. `.env.example` lists
+every key. There are no server addresses to configure; the only network
+endpoint the app itself talks to is OpenAI's, fixed to
+`https://api.openai.com`.
 
 ## Privacy
 
-- Audio and transcripts stay on your Mac. Nothing leaves unless you turn on cloud transcription (Settings > Cloud, with your own key). It also needs a cloud model for a recording. That model can be the default, or you can pick it in Re-transcribe. Then that recording's audio goes to OpenAI. "Test Key" in Settings > Cloud sends only the key, to OpenAI's model list.
-- There is no telemetry, no analytics, and no account.
-- The first time you use a model, it downloads from Hugging Face. Speech recognition uses `argmaxinc/whisperkit-coreml`. Speaker separation uses `FluidInference/speaker-diarization-coreml`. After that, the speaker models load from disk. The speech library (WhisperKit) also asks Hugging Face for the model's file list each time it loads a model. That happens once per app launch. It checks the cached files and fetches any that are missing. These requests carry no audio, no transcripts, and no personal data.
-- The calendar is read on the Mac through EventKit. It is not sent anywhere. For a recording tied to a calendar event, the attendees' names and email addresses are stored in that recording's `meta.json`. That file is in the working data, not in the transcript. The transcript's frontmatter holds the event's identifier and link. In a 1:1, the other attendee's name labels their side of the conversation.
-- Recording other people can be regulated where you live. Tell participants when the law or good manners call for it.
+- Audio and transcripts stay on your Mac. Nothing is sent anywhere unless
+  you turn on cloud transcription (Settings > Cloud, with your own key) and a
+  cloud model is used for a recording, either as the default model or picked
+  in Re-transcribe. Then that recording's audio goes to OpenAI. "Test Key" in
+  Settings > Cloud sends only the key, to OpenAI's model list.
+- There's no telemetry, no analytics, and no account to create.
+- The first time you use a model it's downloaded from Hugging Face:
+  `argmaxinc/whisperkit-coreml` for speech recognition and
+  `FluidInference/speaker-diarization-coreml` for speaker separation. The
+  speaker models are loaded from disk after that. The speech library
+  (WhisperKit) also asks Hugging Face for the model's file list each time it
+  loads a model, once per app launch, to check the cached files and fetch
+  any that are missing. None of these requests carry audio, transcripts or
+  personal data.
+- The calendar is read on the Mac through EventKit and isn't sent anywhere.
+  For a recording tagged with a calendar event, the attendees' names and
+  email addresses are stored in that recording's `meta.json` (in the working
+  data, not in the transcript). The transcript's frontmatter carries the
+  event's identifier and link, and in a 1:1 the other attendee's name labels
+  their side of the conversation.
+- Recording other people may be regulated where you live. Tell participants
+  when the law, or ordinary manners, calls for it.
 
 See [SECURITY.md](SECURITY.md) for the threat model.
 
 ## Troubleshooting
 
-- **The other side is silent, or a track goes quiet after you plug in headphones.** Switching output or input devices during a call restarts the capture. Both tracks recover within a few seconds. The gap is padded with silence so the tracks stay in sync. If a track stays dead, the menu shows a cross for it and an alert appears. If it keeps failing, check the audio permissions above. You can also try the other capture engine.
-- **"Minnas is already running."** Only one copy can run. A second copy would treat a live recording as interrupted. Find the first copy in the menu bar. Or quit it with Activity Monitor. Then launch again.
-- **Asked for permission again after switching between a download and a source build.** They are signed by different certificates. macOS treats them as different apps for permissions. Stick with one.
-- **Asked for permission again after a rebuild.** You built without the signing identity, so the signature changed. Run `bash scripts/setup-signing-identity.sh` once, then rebuild. If an old entry remains, remove the app from the list in System Settings > Privacy & Security with the minus button. Then grant it on the next launch.
-- **The microphone records pure silence.** Check the default input in System Settings > Sound. If it is your iPhone through Continuity, pick another input.
-- **Logs.** Run `/usr/bin/log show --predicate 'subsystem == "com.jwiderberg.minnas"'`. The subsystem is the `CFBundleIdentifier` from `App/Info.plist`. In zsh, plain `log` is a shell builtin, so use the full path. Only notices and errors are kept.
+- The other side is silent, or a track goes quiet after you plug in
+  headphones. Switching output or input devices mid-call restarts the
+  capture. Both tracks recover within a few seconds and the gap is padded
+  with silence so they stay in sync. If a track stays dead, the menu shows a
+  cross next to it and an alert appears. If it keeps failing, check the
+  audio permissions above, or try the other capture engine.
+- "Minnas is already running." Only one copy may run, because a second one
+  would treat the live recording as interrupted. Find the first copy in the
+  menu bar, or quit it from Activity Monitor, and launch again.
+- Asked for permission again after switching between a download and a source
+  build. They're signed by different certificates and macOS treats them as
+  different apps for permissions. Stick with one.
+- Asked for permission again after a rebuild. You built without the signing
+  identity, so the signature changed. Run
+  `bash scripts/setup-signing-identity.sh` once and rebuild. If a stale entry
+  remains, remove the app from the list in System Settings > Privacy &
+  Security with the minus button and grant it on the next launch.
+- The microphone records pure silence. Check the default input in System
+  Settings > Sound. If it's your iPhone through Continuity, pick another
+  input.
+- Logs: `/usr/bin/log show --predicate 'subsystem == "com.jwiderberg.minnas"'`
+  (the `CFBundleIdentifier` from `App/Info.plist`). In zsh, plain `log` is a
+  shell builtin, hence the full path. Only notices and errors are kept.
 
 ## Development
 
@@ -159,17 +325,45 @@ swift run minnas --self-test      # delivery backoff and pruning rules
 bash -n scripts/*.sh              # shell syntax check
 ```
 
-Run command-line tools with `swift run minnas <flag>`. They need no permissions: `--transcribe <audio>`, `--retranscribe <slug>`, `--diarize <audio>`, `--probe-language <slug>`, `--import-file <path>`, `--deliver <slug> [--run]`, `--settings`, `--version`. `--list-memos` and `--import-memo <id>` read the Voice Memos library. So the process needs Full Disk Access. That is your terminal's, or the app's when run from the bundle.
+The command-line harnesses run with `swift run minnas <flag>` and need no
+permissions: `--transcribe <audio>`, `--retranscribe <slug>`, `--diarize
+<audio>`, `--probe-language <slug>`, `--import-file <path>`, `--deliver
+<slug> [--run]`, `--settings`, `--version`. `--list-memos` and
+`--import-memo <id>` read the Voice Memos library, so the process needs Full
+Disk Access (your terminal's, or the app's when run from the bundle).
 
-The capture tests `--mic-test <seconds> <out.caf>` and `--system-test <seconds> <out.caf>` need the microphone and recording grants. Run them from inside the built app (`.build/Minnas.app/Contents/MacOS/minnas`). The same goes for `--calendar` (needs the Calendars grant) and the `--settings-window`, `--onboarding`, and `--memo-window` window tests. The process-tap test charges its grant to the app that launched it. So start it through LaunchServices:
+The capture harnesses `--mic-test <seconds> <out.caf>` and `--system-test
+<seconds> <out.caf>` need the microphone and recording grants, so run them
+from inside the built app (`.build/Minnas.app/Contents/MacOS/minnas`). The
+same goes for `--calendar` (Calendars grant) and the `--settings-window`,
+`--onboarding` and `--memo-window` window harnesses. The process-tap test
+charges its grant to whichever app launched it, so start it through
+LaunchServices:
 `open -W -n -g --stdout /tmp/tap.log --stderr /tmp/tap.log .build/Minnas.app --args --tap-test 30 /tmp/tap.caf`.
-Test any change to the capture code with a real run. Switch the default input or output device during the run. `CLAUDE.md` holds the engineering rules.
+Test any change to the capture code with a real run while you switch the
+default input or output device. `CLAUDE.md` holds the engineering rules.
 
-Continuous integration (`.github/workflows/ci.yml`) builds the package. It runs `--cleanup-test` and `--self-test`, and it checks the shell scripts (syntax and dry runs). It downloads no models and needs no permissions. It runs on the `macos-15` image, using that image's Xcode 26 install (Swift 6.2). This is the oldest toolchain the package supports. It is also stricter than Xcode 26.6's Swift 6.3 about concurrency. So a build that passes on a newer Xcode locally can still fail in CI.
+Continuous integration (`.github/workflows/ci.yml`) builds the package, runs
+`--cleanup-test` and `--self-test`, and checks the shell scripts (syntax and
+dry runs). It downloads no models and needs no permissions. It runs on the
+`macos-15` image with that image's Xcode 26 install (Swift 6.2), which is the
+oldest toolchain the package supports and stricter about concurrency than
+Xcode 26.6's Swift 6.3, so a build that passes locally on a newer Xcode can
+still fail there.
 
-`Package.resolved` is committed. A build of a given commit uses exactly the dependency versions it names. Update it on purpose with `swift package update`, and read the diff.
+`Package.resolved` is committed: a build of a given commit uses exactly the
+dependency versions it names. Update it on purpose with
+`swift package update`, and read the diff.
 
-**Releases** (`.github/workflows/release.yml`): Bump `CFBundleShortVersionString` in `App/Info.plist`. Commit. Tag that commit `v<version>` and push the tag. The workflow builds on the same image as CI. It signs with the Developer ID certificate, notarizes and staples, zips the app, writes the SHA-256, attests the build's provenance, and creates the GitHub release with verification instructions. You load the five secrets it needs once, with `scripts/release-secrets.sh`. To run everything except the release, and upload the zip as a workflow artifact, use `gh workflow run release.yml -f publish=false`.
+Releases (`.github/workflows/release.yml`): bump `CFBundleShortVersionString`
+in `App/Info.plist`, commit, tag that commit `v<version>` and push the tag.
+The workflow builds on the same image as CI, signs with the Developer ID
+certificate, notarizes and staples, zips, writes the SHA-256, attests the
+build's provenance and creates the GitHub release with verification
+instructions. The five secrets it needs are loaded once with
+`scripts/release-secrets.sh`. `gh workflow run release.yml -f publish=false`
+runs everything except the release itself and uploads the zip as a workflow
+artifact.
 
 ## Licence
 
