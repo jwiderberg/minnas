@@ -386,7 +386,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         }
         if !finishedInTime {
             writerTimedOut.store(true, ordering: .relaxed)
-            tapLog.error("stop: the write queue did not run the finish within \(Int(Self.stopDeadline), privacy: .public) s; abandoning the writer")
+            tapLog.error("stop: the finish did not complete within \(Int(Self.stopDeadline), privacy: .public) s of being queued (the write queue was stuck, or the writer wait above also timed out); abandoning the writer")
         }
         tapLog.notice("stop: cycles=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(self.writerTimedOut.load(ordering: .relaxed), privacy: .public) permissionSuspect=\(self.permissionSuspect, privacy: .public)")
     }
