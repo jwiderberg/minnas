@@ -33,3 +33,12 @@ logs/
 # IDE
 .vscode/
 .idea/
+
+# Signing material, release output and recordings never belong in the repo
+*.p12
+*.p8
+*.pem
+*.cer
+dist/
+*.caf
+*.m4a
