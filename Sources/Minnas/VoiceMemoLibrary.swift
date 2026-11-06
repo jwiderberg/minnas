@@ -240,7 +240,7 @@ enum VoiceMemoLibrary {
                 guard let w = pendingWord else { continue }
                 pendingWord = nil
                 let table = root.attributedString.attributeTable
-                let range = idx < table.count ? (table[idx].timeRange ?? []) : []
+                let range = (0..<table.count).contains(idx) ? (table[idx].timeRange ?? []) : []
                 let start = range.count >= 1 ? range[0] : (words.last?.end ?? 0)
                 let end = range.count >= 2 ? range[1] : start
                 words.append((w, start, end))

@@ -175,7 +175,8 @@ if let idx = CommandLine.arguments.firstIndex(of: "--retranscribe") {
 // Dev harness: capture system audio for N seconds, killing the stream the
 // way the OS would at the midpoint (no request flag), so the watchdog has
 // to notice and re-create it. Play something (afplay) meanwhile to have
-// signal on both sides of the restart. Needs Screen Recording TCC → run
+// signal on both sides of the restart. Needs the configured engine's TCC
+// grant (Screen Recording for sck, System Audio Recording for taps) → run
 // the binary from inside the built .app bundle:
 //   .build/Minnas.app/Contents/MacOS/minnas --system-test <seconds> <output.caf>
 if let idx = CommandLine.arguments.firstIndex(of: "--system-test") {
@@ -897,6 +898,27 @@ if CommandLine.arguments.contains("--self-test") {
         Outbox.pruneAction(meta: delivered, hasTranscript: true, activeSinks: [folderSink]) == .wholeSlot,
         "prune: delivered to the folder → whole slot goes"
     )
+
+    // ─────── Voice Memos transcript parser ───────
+
+    let negativeAttributeIndex = Data(#"""
+        {
+          "attributedString": {
+            "runs": ["Hello", -1, " world.", 0],
+            "attributeTable": [{"timeRange": [0.0, 1.0]}]
+          },
+          "locale": {"identifier": "en_US"}
+        }
+        """#.utf8)
+    do {
+        let parsed = try VoiceMemoLibrary.parseAppleTranscript(negativeAttributeIndex)
+        check(
+            parsed.segments.first?.text == "Hello world.",
+            "voice memo: negative attribute index is ignored"
+        )
+    } catch {
+        check(false, "voice memo: negative attribute index is ignored (\(error))")
+    }
 
     if failed > 0 {
         FileHandle.standardError.write(Data("\nSELF-TEST FAILED (\(failed) assertion(s))\n".utf8))
