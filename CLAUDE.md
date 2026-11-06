@@ -128,7 +128,7 @@ of a meeting while the menubar keeps saying "recording". The rules:
   leaves the finished slot to resume on the next launch, while Cancel keeps
   the app running. Launch recovery then queues finished slots with audio but
   no transcript/provenance before pruning, oldest first, and stops
-  auto-retrying one after three failures. A finished recording with only one surviving stream is transcribed from that stream instead of failing on the missing one.
+  auto-retrying one after three attempts (`transcription_failures` is counted at job start and cleared on success, so a crash mid-job counts). A finished recording with only one surviving stream is transcribed from that stream instead of failing on the missing one.
 - **Test any change to `MicCapture`, `SystemAudioCapture` or
   `SystemAudioTapCapture` with a real run from inside the bundle before
   relaunching the app**: `--mic-test 30 /tmp/x.caf` / `--system-test` /

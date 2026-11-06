@@ -162,7 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if !session.isRunning, stopTask == nil,
+        // A job in its compression tail falls through to the bounded wait
+        // below: its transcript is already written, so "continues at the
+        // next launch" would be false and the .part file would be orphaned.
+        if !session.isRunning, stopTask == nil, compressionTask == nil,
            transcribingTitle != nil || transcribeChain != nil {
             let title = transcribingTitle ?? queuedTranscriptionTitleForQuit ?? "Recording"
             let alert = NSAlert()
@@ -995,6 +998,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcribingTitle = title
         transcribeProgressPct = 0
         refreshStatusItem()
+        // Count the attempt before it runs, so a job that takes the process
+        // down (crash, forced quit) counts too; finish() clears it on
+        // success. Three strikes and the launch resume leaves the slot alone.
+        do {
+            try Outbox.mutateMeta(slot) {
+                $0.transcription_failures = ($0.transcription_failures ?? 0) + 1
+            }
+        } catch {
+            appLog.error("transcription: couldn't record the attempt for \(slot.slug, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         defer {
             transcribingTitle = nil
             transcribeProgressPct = 0
@@ -1025,13 +1038,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await task.value
             compressionTask = nil
         } catch {
-            do {
-                try Outbox.mutateMeta(slot) {
-                    $0.transcription_failures = ($0.transcription_failures ?? 0) + 1
-                }
-            } catch {
-                appLog.error("transcription: couldn't record failure for \(slot.slug, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
             presentError("Transcription failed.", error: error)
             // .caf files remain on disk for a manual retry. Future
             // commit: add "Retry transcription" menu entry that

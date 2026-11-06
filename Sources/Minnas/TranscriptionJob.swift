@@ -22,9 +22,12 @@ private let jobLog = Logger(subsystem: "com.jwiderberg.minnas", category: "Trans
 
 enum TranscriptionJob {
     enum JobError: Error, CustomStringConvertible {
+        case noAudio(String)
         case badSegmentTimes(index: Int, start: Float, end: Float)
         var description: String {
             switch self {
+            case .noAudio(let slug):
+                return "no audio to transcribe for \(slug): neither stream file exists"
             case .badSegmentTimes(let index, let start, let end):
                 return "transcript segment \(index) has bad times (start \(start), end \(end)); nothing was written"
             }
@@ -85,6 +88,14 @@ enum TranscriptionJob {
         var streams: [URL] = []
         if hasMic { streams.append(micAudio) }
         if hasSystem && !duplicate { streams.append(systemAudio) }
+        // Neither file: fail instead of writing an empty transcript over a
+        // good one (reachable via --retranscribe on a slot whose audio was
+        // pruned). One file: transcribe it, and say so in the log so a
+        // one-sided transcript is explainable.
+        guard !streams.isEmpty else { throw JobError.noAudio(slot.slug) }
+        if hasMic != hasSystem {
+            jobLog.notice("\(slot.slug, privacy: .public): only the \(hasMic ? "mic" : "system", privacy: .public) stream exists; transcribing that one")
+        }
         // One dominant language across both streams is the STARTING point;
         // each stream then re-checks per chunk (a Swedish stretch inside an
         // English meeting, or vice versa). An explicit pin skips all that.
