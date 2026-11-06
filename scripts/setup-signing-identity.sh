@@ -4,11 +4,12 @@
 # login keychain so make-app.sh produces builds with a stable code
 # signature.
 #
-# Why: TCC keys grants (Screen Recording, microphone) off the code
-# signature hash. Ad-hoc signing (`codesign --sign -`) produces a new
-# hash on every build, which macOS interprets as a new app and revokes
-# the previous grant. A stable self-signed identity keeps the hash
-# constant across rebuilds, so TCC grants persist.
+# Why: TCC keys grants (Microphone, System Audio Recording, Screen
+# Recording with the ScreenCaptureKit engine, Calendars, Full Disk Access)
+# off the code signature hash. Ad-hoc signing (`codesign --sign -`) produces
+# a new hash on every build, which macOS interprets as a new app and revokes
+# the previous grants. A stable self-signed identity keeps the hash constant
+# across rebuilds, so TCC grants persist.
 #
 # Side effects:
 #   - Creates ~/Library/Keychains/login.keychain-db entry "Minnas Dev"

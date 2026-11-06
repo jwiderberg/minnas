@@ -181,9 +181,10 @@ bash scripts/uninstall.sh --dry-run   # preview
 bash scripts/uninstall.sh
 ```
 
-It removes the app, then asks separately (default no) before deleting the
-working data in Application Support (your recorded audio), the keychain item,
-the signing identity, and the permission grants. It never touches your
+It asks before each step, and the default is no: removing the app, deleting
+the working data in Application Support (your recorded audio), deleting the
+keychain item, deleting the signing identity, and resetting the permission
+grants. It stops if Minnas is running, so quit it first. It never touches your
 transcripts folder.
 
 ## First run and permissions
@@ -198,12 +199,13 @@ calendar). The table below is every permission it can ask for.
 | --- | --- | --- | --- |
 | Microphone | Your side of the meeting. | During setup, or the first time you start a recording. | Nothing can be recorded. |
 | System Audio Recording (the default capture engine) | The other participants' side, through a Core Audio process tap. Audio only. | The first time you start a recording. | Your microphone is still captured, but the other side is empty (the tap delivers silence). The app warns when a track is silent after 15 seconds. |
-| Screen Recording (only if you switch to the ScreenCaptureKit engine) | The same, through ScreenCaptureKit, which macOS files under Screen Recording. Audio only; the screen is never captured. | The first recording after you switch. | As above; the app also alerts if the stream cannot be restarted. |
+| Screen Recording (only if you switch to the ScreenCaptureKit engine) | The same, through ScreenCaptureKit, which macOS files under Screen & System Audio Recording. Audio only; the screen is never captured. | The first recording after you switch. | The recording does not start and the app says "Couldn't start recording." Only the default engine carries on with your microphone and an empty other side. The app also alerts if the stream cannot be restarted. |
 | Calendars (optional) | Prompt you before meetings and name the other person in a 1:1. | When you choose "macOS Calendar" as the calendar source and press Grant Calendar Access (setup, or Settings > Calendar). | No prompts. You start recordings from the menu. |
 | Full Disk Access (optional) | Read iPhone memos in the Voice Memos library. macOS never prompts for it. | The app appears, switched off, under System Settings > Privacy & Security > Full Disk Access after the first import attempt. | "Import Voice Memos" cannot read the library. Recording and file import are unaffected. |
 
 Grant them in System Settings > Privacy & Security, then relaunch the app.
-Settings > Permissions shows where each one stands.
+The two audio permissions are both listed under Screen & System Audio
+Recording. Settings > Permissions shows where each one stands.
 
 On the choice of capture engine: the default (`systemAudioEngine` = `taps`)
 is a Core Audio process tap. It needs only the System Audio Recording
@@ -228,9 +230,9 @@ It needs Screen Recording.
 - Working data. Audio, the per-recording metadata (`meta.json`) and a local
   copy of each transcript live in
   `~/Library/Application Support/minnas/outbox/`, one folder per recording.
-- Retention. Recorded audio is deleted after 30 days by default
-  (`recordingsKeepDays`; `0` keeps it forever), counted from when the
-  recording arrived. Until then you can re-transcribe it with another model.
+- Retention. Recorded audio is deleted at the next launch after it is 30 days
+  old by default (`recordingsKeepDays`; `0` keeps it forever), counted from
+  when the recording arrived. Until then you can re-transcribe it with another model.
   Transcripts in your transcripts folder are never touched. When the audio
   goes, the outbox copy of a transcript that's already in your folder goes
   with it; a transcript that never reached a folder (because none was
@@ -256,9 +258,11 @@ $MINNAS --settings set openAIKey -          # "-" reads the value from stdin
 $MINNAS --settings unset recordingsKeepDays
 ```
 
-An environment variable of the same name wins over a stored setting, which
-wins over a `.env` file, which wins over the default. `.env.example` lists
-every key. The app's own code talks to one network endpoint, OpenAI's, fixed
+An environment variable wins over a stored setting, which wins over a `.env`
+file, which wins over the default. The variable names are in capitals
+(`RECORDINGS_KEEP_DAYS` for `recordingsKeepDays`) and `.env.example` lists
+them. `defaultModel`, `cloudTranscriptionEnabled`, `calendarSource` and
+`onboardingCompleted` have no variable. The app's own code talks to one network endpoint, OpenAI's, fixed
 to `https://api.openai.com`, and only when cloud transcription is on, so there
 are no server addresses to configure. The model libraries download their
 models from Hugging Face; see Privacy below.
@@ -348,10 +352,10 @@ default input or output device. `CLAUDE.md` holds the engineering rules.
 Continuous integration (`.github/workflows/ci.yml`) builds the package, runs
 `--cleanup-test` and `--self-test`, and checks the shell scripts (syntax and
 dry runs). It downloads no models and needs no permissions. It runs on the
-`macos-15` image with that image's Xcode 26 install (Swift 6.2), which is the
-oldest toolchain the package supports and stricter about concurrency than
-Xcode 26.6's Swift 6.3, so a build that passes locally on a newer Xcode can
-still fail there.
+`macos-15` image and selects that image's Xcode 26 install, failing if there
+is none. That is Swift 6.2, the oldest toolchain the package supports and
+stricter about concurrency than Xcode 26.6's Swift 6.3, so a build that
+passes locally on a newer Xcode can still fail there.
 
 `Package.resolved` is committed: a build of a given commit uses exactly the
 dependency versions it names. Update it on purpose with
@@ -364,8 +368,8 @@ certificate, notarizes and staples, zips, writes the SHA-256, attests the
 build's provenance and creates the GitHub release with verification
 instructions. The five secrets it needs are loaded once with
 `scripts/release-secrets.sh`. `gh workflow run release.yml -f publish=false`
-runs everything except the release itself and uploads the zip as a workflow
-artifact.
+runs everything except the attestation and the release itself and uploads the
+zip as a workflow artifact.
 
 ## Licence
 

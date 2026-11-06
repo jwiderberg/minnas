@@ -272,8 +272,9 @@ cat <<EOF
     window opens on first launch and asks where transcripts go (it suggests
     ~/Documents/Minnas Transcripts).
 
-    Permission prompts, in this order, the first time you record. macOS shows
-    the app's own explanation with each:
+    Permission prompts. macOS shows the app's own explanation with each. The
+    microphone comes during setup (step 2 of 4), the system audio one with your
+    first recording:
       1. Microphone: your side of the call.
 EOF
 quote "$MIC_STRING"

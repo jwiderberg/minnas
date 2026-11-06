@@ -64,12 +64,6 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
 
-# Codesign. Prefer the stable self-signed "Minnas Dev" identity
-# created by scripts/setup-signing-identity.sh — it gives the binary a
-# consistent signature hash across rebuilds, which is what TCC keys
-# Screen Recording / microphone grants off. Fall back to ad-hoc with a
-# warning if the identity isn't installed; that mode works but TCC will
-# revoke its grant on every rebuild.
 # Refuse to ship FluidAudio's prebuilt NemoTextProcessing Rust library: the
 # Diarizer-only trait must keep it out, and an unauditable native blob has
 # no place in a process holding mic + screen + FDA grants. Checked BEFORE
@@ -83,6 +77,12 @@ if grep -q _nemo_ <<<"$NM_OUT"; then
     exit 1
 fi
 
+# Codesign. Prefer the stable self-signed "Minnas Dev" identity
+# created by scripts/setup-signing-identity.sh — it gives the binary a
+# consistent signature hash across rebuilds, which is what TCC keys the
+# microphone, system audio and calendar grants off. Fall back to ad-hoc with
+# a warning if the identity isn't installed; that mode works but TCC will
+# revoke the grants on every rebuild.
 IDENTITY_NAME="Minnas Dev"
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
     if [[ -n "${CODESIGN_KEYCHAIN:-}" ]]; then
