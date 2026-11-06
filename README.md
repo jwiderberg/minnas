@@ -237,8 +237,8 @@ It needs Screen Recording.
   When the audio goes, the outbox copy of a transcript that's already in your
   folder goes with it; a transcript that never reached a folder (because none
   was chosen) stays in the outbox. A recording whose transcript is still
-  waiting to be written to the folder is kept whole. Raw captures are compressed to
-  AAC after transcription.
+  waiting to be written to the folder is kept whole. Raw captures are
+  compressed to AAC after transcription.
 - Models. Speech models are cached under
   `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml`, speaker
   models under `~/Library/Application Support/FluidAudio/Models`.
