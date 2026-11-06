@@ -232,9 +232,9 @@ It needs Screen Recording.
   `~/Library/Application Support/minnas/outbox/`, one folder per recording.
 - Retention. Recorded audio is deleted at the next launch after it is 30 days
   old by default (`recordingsKeepDays`; `0` keeps it forever), counted from
-  when the recording arrived. Until then you can re-transcribe it with another model.
-  Transcripts in your transcripts folder are never touched. When the audio
-  goes, the outbox copy of a transcript that's already in your folder goes
+  when the recording arrived. Until then you can re-transcribe it with
+  another model. Transcripts in your transcripts folder are never touched.
+  When the audio goes, the outbox copy of a transcript that's already in your folder goes
   with it; a transcript that never reached a folder (because none was
   chosen) stays in the outbox. A recording whose transcript is still waiting
   to be written to the folder is kept whole. Raw captures are compressed to
@@ -262,8 +262,10 @@ An environment variable wins over a stored setting, which wins over a `.env`
 file, which wins over the default. The variable names are in capitals
 (`RECORDINGS_KEEP_DAYS` for `recordingsKeepDays`) and `.env.example` lists
 them. `defaultModel`, `cloudTranscriptionEnabled`, `calendarSource` and
-`onboardingCompleted` have no variable. The app's own code talks to one network endpoint, OpenAI's, fixed
-to `https://api.openai.com`, and only when cloud transcription is on, so there
+`onboardingCompleted` have no variable.
+
+The app's own code talks to one network endpoint, OpenAI's, fixed to
+`https://api.openai.com`, and only when cloud transcription is on, so there
 are no server addresses to configure. The model libraries download their
 models from Hugging Face; see Privacy below.
 
