@@ -149,23 +149,30 @@ If you switch, you'll be granting again.
 
 ### Verify a download
 
-Each check proves one thing. The first two need the
-[GitHub CLI](https://cli.github.com); the last two are built into macOS.
+Each check proves one thing. Only the attestation check needs the
+[GitHub CLI](https://cli.github.com); the others are built into macOS.
 
 ```sh
 shasum -a 256 -c Minnas-<version>.zip.sha256         # the file is intact
-gh attestation verify Minnas-<version>.zip --repo jwiderberg/minnas
+gh attestation verify Minnas-<version>.zip --repo jwiderberg/minnas \
+     --source-ref refs/tags/v<version> \
+     --signer-workflow jwiderberg/minnas/.github/workflows/release.yml
      # this exact file was produced by this repository's release workflow
      # from the tagged commit (a Sigstore-signed statement from GitHub)
 spctl --assess --type execute -vv Minnas.app          # "accepted source=Notarized Developer ID"
 codesign -dvv Minnas.app 2>&1 | grep TeamIdentifier   # the Team ID shown in the release notes
 ```
 
+`--source-ref` and `--signer-workflow` rule out a file built from a branch or
+by some other workflow. Without them the check passes for any build this
+repository's workflows made.
+
 The attestation ties the binary to public source. Notarization says Apple
 scanned it and that the signer holds a Developer ID. Judging the source
 itself is on you: read it, and read `Package.resolved` for what it pulls
-in. The release notes carry the SHA-256 and the Team ID. [SECURITY.md](SECURITY.md#releases) describes how releases
-are built and what a compromise would look like.
+in. The release notes carry the SHA-256 and the Team ID.
+[SECURITY.md](SECURITY.md#releases) describes how releases are built and what
+a compromise would look like.
 
 ## Uninstall
 

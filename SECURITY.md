@@ -116,6 +116,9 @@ What that lets you check (commands in the README under "Verify a download"):
 - `gh attestation verify` says this exact file was produced by this
   repository's release workflow from that commit. The statement is signed by
   GitHub through Sigstore; the repository cannot forge it after the fact.
+  Run it with `--source-ref refs/tags/v<version>` and `--signer-workflow
+  jwiderberg/minnas/.github/workflows/release.yml`, as the README shows. That
+  rules out a file built from a branch or by another workflow.
 - `spctl --assess` says Apple's notary service scanned the binary and that it
   is signed by a Developer ID certificate. The Team ID is in the release notes.
 
@@ -128,7 +131,8 @@ notarization API key are GitHub repository secrets, readable only by workflow
 runs. Someone who takes over the GitHub account, or finds a way to run code in
 this repository's Actions, could sign a build. Mitigations: the attestation
 would still name the commit and workflow that produced it, so a build that did
-not come from a tagged commit on this repository is detectable; Apple can
+not come from a tagged commit on this repository is detectable when you verify
+with the options above; Apple can
 revoke the certificate; and every notarized build is on record with Apple.
 The local "Minnas Dev" identity used for source builds is a separate key that
 never leaves your Mac.
