@@ -217,14 +217,20 @@ jobs:
           # The ticket is fetched from Apple's CloudKit, which drops the
           # connection now and then right after "Accepted" (2026-11-06:
           # "The network connection was lost", stapler exit 68). Retry.
-          STAPLED=0
-          for attempt in 1 2 3 4 5 6; do
-            if xcrun stapler staple .build/Minnas.app; then STAPLED=1; break; fi
-            echo "stapler attempt $attempt failed; retrying in 30 s"
-            sleep 30
-          done
-          [[ "$STAPLED" == 1 ]] || { echo "::error::stapling failed after 6 attempts"; exit 1; }
-          xcrun stapler validate .build/Minnas.app
+          # `stapler validate` looks the ticket up online as well, so both
+          # get the same treatment.
+          retry() {
+            local attempt
+            for attempt in 1 2 3 4 5 6; do
+              if "$@"; then return 0; fi
+              echo "attempt $attempt of '$*' failed; retrying in 30 s"
+              sleep 30
+            done
+            echo "::error::'$*' failed 6 times"
+            return 1
+          }
+          retry xcrun stapler staple .build/Minnas.app
+          retry xcrun stapler validate .build/Minnas.app
           # Gatekeeper's own verdict. "Notarized Developer ID" is the only
           # acceptable source for a download.
           spctl --assess --type execute --verbose=2 .build/Minnas.app 2>&1 | tee "$RUNNER_TEMP/spctl.txt"
