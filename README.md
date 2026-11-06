@@ -8,57 +8,45 @@ pick. "Minnas" is Swedish for "to remember".
 
 ## Why
 
-My work happens on other people's platforms. One client is on Teams, one
-on Zoom, others on Meet, and each of them has a different idea about
-note-taking. Three things about that wore me down, and this app is what
-came out of it.
+Three reasons, in the order they annoyed me.
 
-The bots were the first thing. Every note-taking service I tried worked by
-joining the meeting as a participant, and the ones other people used would
-join mine, sometimes for meetings their owner wasn't even attending. It
-turns out I'm not the only one who found that creepy. In August 2025
-Otter.ai was sued by a man who had never had an Otter account; another
-attendee's bot had recorded him on a Zoom call
+Bots in calls. The note-taking services work by joining the meeting as a
+participant, and other people's bots join yours, sometimes for meetings
+their owner isn't attending. In August 2025 Otter.ai was sued by a man who
+had never had an Otter account; another attendee's bot had recorded him on a
+Zoom call
 ([NPR](https://www.npr.org/2025/08/15/g-s1-83087/otter-ai-transcription-class-action-lawsuit)).
 The University of Washington blocked Read AI from its Zoom and Teams because
 the bot was sitting in meetings its own users had skipped
 ([UW-IT](https://it.uw.edu/guides/security-authentication/read-ai-deactivation/)).
-Teams has since started dumping unregistered bots into a lobby bucket
-labelled "Suspected threats" and making the organiser confirm each one
-([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/)),
-and Meet now tags third-party bots at the door
+Teams now puts unregistered bots in a lobby bucket labelled "Suspected
+threats" and makes the organiser confirm each one
+([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/));
+Meet tags third-party bots at the door
 ([UC Today](https://www.uctoday.com/security-compliance-risk/google-meet-launches-update-to-better-screen-suspicious-bots/)).
-What bothered me most is that none of this is necessary. The audio is
-already coming out of my Mac's speakers. There's nothing to join.
+The audio is already coming out of the Mac. There is nothing to join.
 
-Then the hardware. The AI recorders avoid the bot problem by giving you a
-physical device, and then they meter the thing you bought it for. A Plaud
-comes with 300 transcription minutes a month; past that you're on a plan,
-$8.33 a month for Pro or $20 for Unlimited if you pay yearly, more if you
-pay monthly
+Hardware with a plan attached. The AI recorders avoid the bot by selling you
+a device, then meter the transcription. A Plaud comes with 300 minutes a
+month; after that it's $8.33 a month for Pro or $20 for Unlimited, billed
+yearly, more if monthly
 ([Plaud pricing](https://www.plaud.ai/pages/plaud-ai-plan-pricing)).
-The audio goes to their servers and the gadget is really a key to the
-subscription. Meanwhile the laptop I'm recording on has a Neural Engine that
-runs Whisper comfortably. I didn't see why I should rent that capability
-back.
+The audio goes to their servers and the device is a key to the
+subscription. The Mac I'm recording on runs Whisper on its own Neural
+Engine.
 
-And the platforms. Okta's Businesses at Work report found that 45% of its
-Microsoft 365 customers also ran Zoom
-([Zoom's summary of the 2022 report](https://www.zoom.com/en/blog/zoom-okta-2022-businesses-at-work-report/)),
-which matches my experience: nobody is on one platform, and each platform's
-own notes feature only works inside that platform, with its own licence.
-Teams' intelligent recap needs Teams Premium or a Microsoft 365 Copilot seat
-([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)).
-Meet's "Take notes for me" needs a Gemini or AI Meetings add-on on the
-organiser's account, and if you're a guest in someone else's meeting you get
-nothing at all
+Teams, Zoom and Meet at once. Okta's Businesses at Work report found 45% of
+its Microsoft 365 customers also ran Zoom
+([Zoom's summary of the 2022 report](https://www.zoom.com/en/blog/zoom-okta-2022-businesses-at-work-report/)).
+Each platform's own notes feature covers that platform only and needs its
+own licence: Teams' intelligent recap wants Teams Premium or a Microsoft 365
+Copilot seat
+([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)),
+Meet's "Take notes for me" wants a Gemini or AI Meetings add-on on the
+organiser's account, so a guest gets nothing
 ([Google Meet help](https://support.google.com/meet/answer/14754931)).
-I wanted one folder of Markdown files, one per meeting, regardless of whose
-software the meeting ran on.
-
-So Minnas records whatever the Mac is playing and whatever the microphone
-hears, transcribes it on the Neural Engine, and writes a file. That's the
-whole idea.
+I wanted one folder of Markdown files, one per meeting, whatever the meeting
+ran on.
 
 ## What it does
 
