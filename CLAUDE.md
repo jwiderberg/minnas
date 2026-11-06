@@ -115,6 +115,12 @@ of a meeting while the menubar keeps saying "recording". The rules:
   `recoverInterruptedRecordings` finishes any slot with raw .caf files and no
   ended_at, alerts, and transcribes it. `capture_health` in meta.json records
   restarts, padded seconds and captured seconds per stream.
+- Writer shutdown is bounded in both system engines (2026-11-06): `stop()`
+  waits at most 10 s for `finishWriting` (SCK: the continuation races a
+  global-queue deadline, so a wedged writer or write queue can't hang Stop),
+  then logs the writer status and abandons the writer. Never `cancelWriting`
+  there: per AVAssetWriter.h it blocks and deletes the output file. The stop
+  line carries `writerTimedOut=`.
 - Quit runs the normal asynchronous stop path before terminating, so capture
   writers are finalized, `ended_at` is persisted, and transcription is
   queued; AppKit waits at most 15 seconds before allowing termination.
