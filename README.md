@@ -6,6 +6,56 @@ Minnas is a Mac menubar app that records your meetings, transcribes them on
 your Mac, and saves the result as Markdown in a folder you choose. "Minnas" is
 Swedish for "to remember".
 
+## Why
+
+I built Minnas because three things about meeting notes had worn me down.
+
+**Bots joining calls.** Every note-taking service wanted to put a participant
+in my meetings, and other people's bots kept showing up in mine. The pushback
+is now institutional: Otter.ai was hit with a class action in August 2025 by
+someone who never had an account but was recorded by another attendee's bot
+([NPR](https://www.npr.org/2025/08/15/g-s1-83087/otter-ai-transcription-class-action-lawsuit)),
+the University of Washington blocked Read AI from its Zoom and Teams because
+the bot joined meetings its own users were not attending
+([UW-IT](https://it.uw.edu/guides/security-authentication/read-ai-deactivation/)),
+Microsoft Teams now sorts unregistered bots into a "Suspected threats" lobby
+and asks the organizer to confirm before one is admitted
+([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/)),
+and Google Meet tags third-party bots on the way in
+([UC Today](https://www.uctoday.com/security-compliance-risk/google-meet-launches-update-to-better-screen-suspicious-bots/)).
+A bot is a stranger in the room. The audio is already on my Mac; I wanted
+to record that.
+
+**Hardware tied to subscriptions.** The AI recorders solve the bot problem
+by selling you a device and then metering the transcription. A Plaud device
+comes with 300 transcription minutes a month on the free plan; beyond that it
+is $8.33 a month for Pro or $20 a month for Unlimited, billed annually, with
+higher monthly rates
+([Plaud pricing](https://www.plaud.ai/pages/plaud-ai-plan-pricing)).
+The minutes are the product, the audio lives on their servers, and the device
+is a dongle for the plan. An Apple silicon Mac already runs Whisper well; it
+should not need a subscription to do so.
+
+**A work life spread across Teams, Zoom and Meet.** Each client lives on a
+different platform. Okta's Businesses at Work data has long shown the overlap:
+45% of its Microsoft 365 customers also deployed Zoom in the 2022 report
+([Zoom's summary of the report](https://www.zoom.com/en/blog/zoom-okta-2022-businesses-at-work-report/)).
+Each platform's built-in notes need their own licence and stay in their own
+silo: Teams intelligent recap requires a Teams Premium or Microsoft 365 Copilot
+licence
+([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)),
+and Meet's "Take notes for me" needs a Gemini or AI Meetings add-on on the
+organizer's account, so as a guest you get nothing
+([Google Meet help](https://support.google.com/meet/answer/14754931)).
+I wanted one folder of Markdown files, one per meeting, whatever app the
+meeting happened in.
+
+So: a menubar app that records what the Mac plays and what the microphone
+hears, transcribes on the Neural Engine, and writes plain files. No bot, no
+device, no plan.
+
+## What it does
+
 - **No bot joins your call.** It captures the audio your Mac plays and the
   audio your microphone hears, so it works with Zoom, Teams, Meet, or anything
   else that makes sound.
