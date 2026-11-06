@@ -78,7 +78,7 @@ BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' App/Info.pli
 # The app keeps its data in Application Support under the executable name.
 SUPPORT_DIR="$HOME/Library/Application Support/$EXECUTABLE_NAME"
 
-[[ $DRY_RUN -eq 1 ]] && echo "DRY RUN: nothing below is removed; commands are printed, not run."
+[[ $DRY_RUN -eq 1 ]] && echo "DRY RUN: nothing below is removed; the commands are only printed."
 echo "App: $APP_NAME.app   bundle id: $BUNDLE_ID   signing identity: $IDENTITY_NAME"
 
 # ---------------------------------------------------------------- 1. app

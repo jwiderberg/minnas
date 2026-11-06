@@ -57,17 +57,17 @@ all your transcriptions, regardless of platform, local and in an open format
 
 ## What it does
 
-- Nothing joins your call. Minnas captures the audio your Mac plays and the
-  audio your microphone hears, so Zoom, Teams, Meet, FaceTime, a browser
-  tab, all look the same to it.
+- Minnas captures the audio your Mac plays and the audio your microphone
+  hears, so Zoom, Teams, Meet, FaceTime and a browser tab all look the same
+  to it. It never joins the call.
 - Transcription runs on the Apple Neural Engine with
   [WhisperKit](https://github.com/argmaxinc/WhisperKit). Speakers are told
   apart on the device too, with an on-device diarization model from
   [FluidAudio](https://github.com/FluidInference/FluidAudio).
 - Your microphone and the other participants are recorded and transcribed as
-  separate tracks, so "Me" and "Them" are known rather than guessed. When
-  several people speak on the far side it's split further into "Them (A)",
-  "Them (B)" and so on.
+  separate tracks, so the transcript always knows which side is "Me" and
+  which is "Them". When several people speak on the far side it's split
+  further into "Them (A)", "Them (B)" and so on.
 - Each meeting becomes a Markdown file in a folder of your choice. A notes
   vault, a synced folder, wherever.
 - If you want higher accuracy and don't mind that one recording's audio is
@@ -162,10 +162,9 @@ codesign -dvv Minnas.app 2>&1 | grep TeamIdentifier   # the Team ID shown in the
 ```
 
 The attestation ties the binary to public source. Notarization says Apple
-scanned it and that the signer holds a Developer ID. Neither says anything
-about whether the source is harmless, so read it, and read
-`Package.resolved` for what it pulls in. The release notes carry the SHA-256
-and the Team ID. [SECURITY.md](SECURITY.md#releases) describes how releases
+scanned it and that the signer holds a Developer ID. Judging the source
+itself is on you: read it, and read `Package.resolved` for what it pulls
+in. The release notes carry the SHA-256 and the Team ID. [SECURITY.md](SECURITY.md#releases) describes how releases
 are built and what a compromise would look like.
 
 ## Uninstall
@@ -214,9 +213,9 @@ It needs Screen Recording.
 
 - Transcripts. The Markdown files go to the folder you choose in setup or in
   Settings > General (setting `transcriptsFolderPath`), named
-  `<yyyy-MM-dd HHmm> <title>.md`. Minnas only ever adds or updates files
-  there. It never deletes anything in that folder, and neither does
-  `scripts/uninstall.sh`. Until you've chosen a folder, transcripts stay in
+  `<yyyy-MM-dd HHmm> <title>.md`. Minnas adds and updates files there and
+  never deletes anything in that folder; `scripts/uninstall.sh` leaves it
+  alone too. Until you've chosen a folder, transcripts stay in
   the working data below; once you choose one, every existing transcript is
   written out within five minutes.
 - Working data. Audio, the per-recording metadata (`meta.json`) and a local
@@ -234,8 +233,7 @@ It needs Screen Recording.
 - Models. Speech models are cached under
   `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml`, speaker
   models under `~/Library/Application Support/FluidAudio/Models`.
-- Secrets. An OpenAI key, if you add one, is stored in your login keychain,
-  not in a file.
+- Secrets. An OpenAI key, if you add one, is stored in your login keychain.
 
 ## Settings
 
@@ -253,9 +251,8 @@ $MINNAS --settings unset recordingsKeepDays
 
 An environment variable of the same name wins over a stored setting, which
 wins over a `.env` file, which wins over the default. `.env.example` lists
-every key. There are no server addresses to configure; the only network
-endpoint the app itself talks to is OpenAI's, fixed to
-`https://api.openai.com`.
+every key. The app talks to one network endpoint, OpenAI's, fixed to
+`https://api.openai.com`, so there are no server addresses to configure.
 
 ## Privacy
 
@@ -275,10 +272,10 @@ endpoint the app itself talks to is OpenAI's, fixed to
   personal data.
 - The calendar is read on the Mac through EventKit and isn't sent anywhere.
   For a recording tagged with a calendar event, the attendees' names and
-  email addresses are stored in that recording's `meta.json` (in the working
-  data, not in the transcript). The transcript's frontmatter carries the
-  event's identifier and link, and in a 1:1 the other attendee's name labels
-  their side of the conversation.
+  email addresses are stored in that recording's `meta.json` in the working
+  data. The transcript's frontmatter carries the event's identifier and
+  link, and in a 1:1 the other attendee's name labels their side of the
+  conversation.
 - Recording other people may be regulated where you live. Tell participants
   when the law, or ordinary manners, calls for it.
 

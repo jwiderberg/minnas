@@ -122,7 +122,7 @@ MIN_MACOS="$(plist_get LSMinimumSystemVersion)"
 MIN_MACOS_MAJOR="${MIN_MACOS%%.*}"
 MIN_MACOS_MINOR="$(cut -d. -f2 <<<"$MIN_MACOS.0")"
 
-[[ $DRY_RUN -eq 1 ]] && echo "DRY RUN: nothing below is changed; commands are printed, not run."
+[[ $DRY_RUN -eq 1 ]] && echo "DRY RUN: nothing below is changed; the commands are only printed."
 
 # ---------------------------------------------------------------- 1. system
 step "1/8 Checking macOS and hardware"

@@ -20,9 +20,9 @@ The assets worth protecting are therefore:
 ## Who the design defends against
 
 **Other software running as you.** This is the main case. Any process under
-your account can already read your files, so Minnas does not try to hide
-transcripts from it. What Minnas does try to prevent is that process
-borrowing the app's microphone and recording permissions, or reading the key:
+your account can already read your files, and Minnas can't hide transcripts
+from it. What Minnas can do is stop that process borrowing the app's
+microphone and recording permissions, or reading the key:
 
 - **Hardened runtime.** The app is signed with the hardened runtime and a
   minimal entitlements file (`App/Minnas.entitlements`: audio input, and
@@ -33,10 +33,9 @@ borrowing the app's microphone and recording permissions, or reading the key:
   keychain as non-extractable, and only `/usr/bin/codesign` is allowed to use it
   without a prompt. The key cannot be copied off the Mac or used from another
   program. A process running as you could still call `codesign` with it to
-  re-sign a modified copy, so this raises the bar rather than closing the door
+  re-sign a modified copy, so this makes misuse harder without ruling it out
   (see "What we do not protect against").
-- **Secrets in the keychain.** The OpenAI key is stored as a keychain item, not
-  in a file or in app preferences.
+- **Secrets in the keychain.** The OpenAI key is stored as a keychain item.
 - **A single-instance lock.** A second copy of the app cannot start and treat a
   live recording as abandoned. That would otherwise delete audio that is still
   being written.
@@ -88,17 +87,17 @@ fixed.
 - **Your own transcripts folder.** If you point it at a folder that syncs to a
   cloud service or is shared, what is in it is exactly as exposed as that
   service.
-- **Cloud transcription.** When you turn it on, that audio is subject to
-  OpenAI's handling, not ours.
+- **Cloud transcription.** When you turn it on, that audio is handled under
+  OpenAI's terms.
 - **Model downloads are not pinned by hash.** Models come from Hugging Face over
-  HTTPS and are checked by size, not by a signed digest. Someone who controls
-  those repositories, or your connection to them, could serve a different model.
-  Models are Core ML weights, not programs, but we do not claim more than we
-  verify.
+  HTTPS and are checked only by size. Someone who controls those repositories,
+  or your connection to them, could serve a different model. Models are Core
+  ML weights, which limits what a swapped model could do, but we haven't
+  verified more than that.
 - **Supply chain.** The app builds on WhisperKit and FluidAudio. Dependency
-  versions are resolved by SwiftPM when you build; read what you build.
-- **A source build is self-signed, not notarized.** The local identity only
-  gives macOS a stable signature to attach permissions to; nobody but you
+  versions are pinned in `Package.resolved`; read what you build.
+- **A source build is self-signed.** The local identity gives macOS a stable
+  signature to attach permissions to, and that is all it does; nobody but you
   vouches for that build. Downloaded releases are notarized; see Releases.
 - **Recording consent.** Whether you may record a conversation depends on where
   you and the other people are. That is your responsibility.
@@ -120,9 +119,9 @@ What that lets you check (commands in the README under "Verify a download"):
 - `spctl --assess` says Apple's notary service scanned the binary and that it
   is signed by a Developer ID certificate. The Team ID is in the release notes.
 
-What it does not prove: that the source is harmless (read it), that the
-dependencies are (read `Package.resolved`), or that the macOS runner image was
-clean (we trust GitHub for that, as everyone using hosted runners does).
+Three things are left to you: reading the source, reading `Package.resolved`
+for the dependencies, and trusting GitHub's macOS runner image (as everyone
+using hosted runners does).
 
 Where the keys are. The Developer ID certificate's private key and the
 notarization API key are GitHub repository secrets, readable only by workflow
