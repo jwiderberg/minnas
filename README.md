@@ -105,7 +105,7 @@ you got.
 
 ### Build from source
 
-Or build it yourself, from a clone you can read:
+To build from source:
 
 ```sh
 git clone https://github.com/jwiderberg/minnas.git
