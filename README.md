@@ -258,16 +258,19 @@ $MINNAS --settings unset recordingsKeepDays
 
 An environment variable of the same name wins over a stored setting, which
 wins over a `.env` file, which wins over the default. `.env.example` lists
-every key. The app talks to one network endpoint, OpenAI's, fixed to
-`https://api.openai.com`, so there are no server addresses to configure.
+every key. The app's own code talks to one network endpoint, OpenAI's, fixed
+to `https://api.openai.com`, and only when cloud transcription is on, so there
+are no server addresses to configure. The model libraries download their
+models from Hugging Face; see Privacy below.
 
 ## Privacy
 
-- Audio and transcripts stay on your Mac. Nothing is sent anywhere unless
-  you turn on cloud transcription (Settings > Cloud, with your own key) and a
-  cloud model is used for a recording, either as the default model or picked
-  in Re-transcribe. Then that recording's audio goes to OpenAI. "Test Key" in
-  Settings > Cloud sends only the key, to OpenAI's model list.
+- Audio and transcripts stay on your Mac. No audio, transcripts or personal
+  data are sent anywhere unless you turn on cloud transcription (Settings >
+  Cloud, with your own key) and a cloud model is used for a recording, either
+  as the default model or picked in Re-transcribe. Then that recording's audio
+  goes to OpenAI. "Test Key" in Settings > Cloud sends only the key, to
+  OpenAI's model list.
 - There's no telemetry, no analytics, and no account to create.
 - The first time you use a model it's downloaded from Hugging Face:
   `argmaxinc/whisperkit-coreml` for speech recognition and

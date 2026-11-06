@@ -62,7 +62,7 @@
     <string>Minnas records your microphone so it can transcribe what you say during meetings. Recordings are kept on this Mac for the retention period you choose, so they can be re-transcribed; audio leaves this Mac only if you turn on cloud transcription.</string>
 
     <key>NSAudioCaptureUsageDescription</key>
-    <string>Minnas records the other side of your calls — the audio your Mac plays — so it can transcribe them. Nothing is sent anywhere unless you turn on cloud transcription.</string>
+    <string>Minnas records the other side of your calls — the audio your Mac plays — so it can transcribe them. No audio, transcript or personal data leaves this Mac unless you turn on cloud transcription.</string>
 
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>Minnas reads your upcoming meetings so it can offer to record the ones with a Zoom, Meet or Teams link, and name each transcript after its meeting.</string>
