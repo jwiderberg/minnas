@@ -224,9 +224,16 @@ It needs Screen Recording.
 
 - Transcripts. The Markdown files go to the folder you choose in setup or in
   Settings > General (setting `transcriptsFolderPath`), named
-  `<yyyy-MM-dd HHmm> <title>.md`. Minnas adds and updates files there and
-  never deletes anything in that folder; `scripts/uninstall.sh` leaves it
-  alone too. Until you've chosen a folder, transcripts stay in
+  `<yyyy-MM-dd HHmm> <title>.md`. Each file starts with YAML frontmatter:
+  the title, start and end time, the calendar event's identifier and link
+  when the recording was tagged with one, the device, the app version and
+  the languages detected. Then the title as a heading and the conversation
+  as paragraphs labelled `**Me:**` and `**Them:**` (the other person's name
+  in a 1:1, `Them (A)`, `Them (B)` when several people speak). Attendee
+  names and email addresses stay in `meta.json` in the working data; they
+  are not written to the Markdown file. Minnas adds and updates files there
+  and never deletes anything in that folder; `scripts/uninstall.sh` leaves
+  it alone too. Until you've chosen a folder, transcripts stay in
   the working data below; once you choose one, every existing transcript is
   written out within five minutes.
 - Working data. Audio, the per-recording metadata (`meta.json`) and a local
