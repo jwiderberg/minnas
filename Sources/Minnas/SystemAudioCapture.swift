@@ -37,6 +37,13 @@ enum SystemAudioCaptureError: Error {
     case streamStartFailed(underlying: Error)
 }
 
+/// One-shot latch for stop()'s finishWriting-versus-deadline race: the first
+/// claim() wins and resumes the continuation, the other side does nothing.
+private final class FinishLatch: Sendable {
+    private let claimed = Atomic<Bool>(false)
+    func claim() -> Bool { !claimed.exchange(true, ordering: .acquiringAndReleasing) }
+}
+
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SystemAudioEngine, @unchecked Sendable {
     private let outputURL: URL
     private var stream: SCStream?
@@ -88,6 +95,9 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     var hasWriterFailed: Bool { writerFailed.load(ordering: .relaxed) }
 
     private let writeQueue = DispatchQueue(label: "minnas.system-audio.write")
+
+    /// How long stop() waits for finishWriting before abandoning the writer.
+    static let finishWritingTimeout: Double = 10
 
     /// Upper bound on one silence fill. A restart is back in seconds; a
     /// bigger PTS gap is a clock anomaly, and padding it could fill the disk.
@@ -325,17 +335,42 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
 
         // Flush the writer. finishWriting is async on a callback; bridge
         // it to async/await so RecordingSession can sequence cleanup.
+        // Bounded like the taps engine: a wedged writer must not hang stop()
+        // (AppDelegate's isStopping would stay true, Stop would be dead and
+        // the mic would keep recording). The deadline fires from a global
+        // queue, so even a blocked writeQueue can't hold stop() past it.
+        // On timeout the writer is abandoned, NOT cancelled: per
+        // AVAssetWriter.h, -cancelWriting "will block until writing is
+        // canceled" and "If an output file was created by the receiver
+        // during the writing process, -cancelWriting will delete the file"
+        // — that would throw away the whole system track. The completion
+        // handler keeps the writer alive, so a late finish still finalises
+        // the file.
+        var writerTimedOut = false
         if let writer, let input = audioInput {
-            await withCheckedContinuation { cont in
+            let latch = FinishLatch()
+            nonisolated(unsafe) let keepAlive = writer
+            let finished: Bool = await withCheckedContinuation { cont in
                 writeQueue.async {
                     input.markAsFinished()
                     writer.finishWriting {
-                        cont.resume()
+                        if latch.claim() {
+                            cont.resume(returning: true)
+                        } else {
+                            sysLog.notice("finishWriting completed after the deadline (writer status \(keepAlive.status.rawValue, privacy: .public))")
+                        }
                     }
                 }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.finishWritingTimeout) {
+                    if latch.claim() { cont.resume(returning: false) }
+                }
+            }
+            if !finished {
+                writerTimedOut = true
+                sysLog.error("finishWriting did not complete within \(Int(Self.finishWritingTimeout), privacy: .public) s (writer status \(keepAlive.status.rawValue, privacy: .public)); abandoning the writer without cancelWriting, which would delete the file")
             }
         }
-        sysLog.notice("stop: buffers=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSeconds), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public)")
+        sysLog.notice("stop: buffers=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSeconds), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(writerTimedOut, privacy: .public)")
         writer = nil
         audioInput = nil
     }

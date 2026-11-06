@@ -228,6 +228,8 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     private let lastSignalBits = Atomic<UInt64>(0)
     private let writerDrops = Atomic<UInt64>(0)
     private let writerFailed = Atomic<Bool>(false)
+    /// stop()'s finishWriting missed its deadline; the writer was abandoned.
+    private let writerTimedOut = Atomic<Bool>(false)
     private let paddedBits = Atomic<UInt64>(0)
     private let suspect = Atomic<Bool>(false)
 
@@ -363,7 +365,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             tapLog.error("stop: tap/aggregate could not be fully released (see the destroy errors above)")
         }
         await onWrite { self.finishOnWriteQueue() }
-        tapLog.notice("stop: cycles=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) permissionSuspect=\(self.permissionSuspect, privacy: .public)")
+        tapLog.notice("stop: cycles=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(self.writerTimedOut.load(ordering: .relaxed), privacy: .public) permissionSuspect=\(self.permissionSuspect, privacy: .public)")
     }
 
     // MARK: Restart
@@ -783,10 +785,24 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         guard let writer, let input = audioInput else { return }
         input.markAsFinished()
         let done = DispatchSemaphore(value: 0)
-        writer.finishWriting { done.signal() }
-        // Bounded: a wedged writer must not hang stop() forever.
+        // The handler holds the writer until AVFoundation is done with it, so
+        // a finish that lands after the deadline still finalises the file.
+        nonisolated(unsafe) let keepAlive = writer
+        writer.finishWriting { [self] in
+            if self.writerTimedOut.load(ordering: .relaxed) {
+                tapLog.notice("finishWriting completed after the deadline (writer status \(keepAlive.status.rawValue, privacy: .public))")
+            }
+            done.signal()
+        }
+        // Bounded: a wedged writer must not hang stop() forever. On timeout
+        // the writer is abandoned, NOT cancelled: per AVAssetWriter.h,
+        // -cancelWriting "will block until writing is canceled" and "If an
+        // output file was created by the receiver during the writing
+        // process, -cancelWriting will delete the file" — that would throw
+        // away the whole system track.
         if done.wait(timeout: .now() + 10) == .timedOut {
-            tapLog.error("finishWriting did not complete within 10 s")
+            writerTimedOut.store(true, ordering: .relaxed)
+            tapLog.error("finishWriting did not complete within 10 s (writer status \(writer.status.rawValue, privacy: .public)); abandoning the writer without cancelWriting, which would delete the file")
         }
         self.writer = nil
         self.audioInput = nil
