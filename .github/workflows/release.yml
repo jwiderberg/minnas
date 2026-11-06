@@ -7,10 +7,15 @@ name: Release
 #
 # Dry run (no release, the zip is uploaded as a workflow artifact instead):
 #   gh workflow run release.yml -f publish=false
+# A dry run signs, notarizes and staples, but it does not attest the zip and
+# it never gets a token that can write. Only a run on a tag that publishes
+# gets the publish job, and only that job can attest.
 #
 # What a user can verify afterwards, and what each check proves:
 #   shasum -a 256 -c Minnas-<v>.zip.sha256      the download is intact
-#   gh attestation verify Minnas-<v>.zip --repo jwiderberg/minnas
+#   gh attestation verify Minnas-<v>.zip --repo jwiderberg/minnas \
+#       --source-ref refs/tags/v<v> \
+#       --signer-workflow jwiderberg/minnas/.github/workflows/release.yml
 #                                              THIS workflow built THIS file
 #                                              from the tagged commit (Sigstore)
 #   spctl --assess --type execute Minnas.app   Apple notarized it; the
@@ -29,6 +34,12 @@ name: Release
 # signing step is the only one that sees it, and the throwaway keychain is
 # deleted right after signing, with an always() fallback at the end.
 # Third-party actions are pinned to commit SHAs (version in the comment).
+#
+# Two jobs. "build" has a read-only token and the signing secrets; it builds,
+# signs, notarizes and uploads the zip as a workflow artifact. "publish" has
+# the write permissions (release, OIDC token for Sigstore, attestations) and
+# no secrets of its own: it downloads the zip, attests it and creates the
+# release. It runs only for a tag.
 
 on:
   push:
@@ -40,17 +51,22 @@ on:
         type: boolean
         default: false
 
+# Read-only by default. The publish job asks for more, for itself only.
 permissions:
-  contents: write # create the release and upload assets
-  id-token: write # Sigstore signing of the provenance attestation
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact: ${{ steps.version.outputs.artifact }}
+      team: ${{ steps.package.outputs.team }}
     # Same image and toolchain selection as ci.yml: the floor OS, with the
     # Xcode 26 the image carries as a non-default install.
     runs-on: macos-15
@@ -59,6 +75,8 @@ jobs:
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # The throwaway keychain lives outside the workspace. `runner.temp` is
       # not available in a job-level env, so it is exported from a step.
@@ -248,18 +266,63 @@ jobs:
           TEAM="$(codesign -dvv .build/Minnas.app 2>&1 | sed -nE 's/^TeamIdentifier=(.*)$/\1/p')"
           echo "team=$TEAM" >> "$GITHUB_OUTPUT"
 
+      # The zip goes to the publish job (a tag) or stays for inspection (a dry
+      # run) as a workflow artifact either way.
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.version.outputs.artifact }}
+          path: ${{ env.DIST }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove the signing keychain (fallback)
+        if: always()
+        run: |
+          if [[ -f "$KEYCHAIN" ]]; then
+            security delete-keychain "$KEYCHAIN" || rm -f "$KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/AuthKey.p8"
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
+    # Needs nothing macOS-specific: it attests and uploads a finished zip.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release and upload assets
+      id-token: write # Sigstore signing of the provenance attestation
+      attestations: write
+    env:
+      DIST: ${{ github.workspace }}/dist
+    steps:
+      - name: Download the build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: ${{ env.DIST }}
+
+      - name: Check the download against its SHA-256
+        env:
+          ARTIFACT: ${{ needs.build.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          cd "$DIST"
+          sha256sum -c "$ARTIFACT.sha256"
+
       # Sigstore-signed statement that this workflow run produced the zip from
       # this commit. Verifiable offline from the repo name alone.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          subject-path: ${{ env.DIST }}/${{ steps.version.outputs.artifact }}
+          subject-path: ${{ env.DIST }}/${{ needs.build.outputs.artifact }}
 
       - name: Release notes
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          ARTIFACT: ${{ steps.version.outputs.artifact }}
-          TEAM: ${{ steps.package.outputs.team }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ARTIFACT: ${{ needs.build.outputs.artifact }}
+          TEAM: ${{ needs.build.outputs.team }}
         run: |
           set -euo pipefail
           SHA="$(cut -d' ' -f1 "$DIST/$ARTIFACT.sha256")"
@@ -272,7 +335,9 @@ jobs:
 
           \`\`\`sh
           shasum -a 256 -c $ARTIFACT.sha256           # the download is intact
-          gh attestation verify $ARTIFACT --repo ${GITHUB_REPOSITORY}
+          gh attestation verify $ARTIFACT --repo ${GITHUB_REPOSITORY} \\
+              --source-ref refs/tags/${GITHUB_REF_NAME} \\
+              --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml
                                                        # this exact file was built by this
                                                        # workflow from the tagged commit
           spctl --assess --type execute -vv Minnas.app  # "accepted source=Notarized Developer ID"
@@ -286,10 +351,9 @@ jobs:
           cat "$RUNNER_TEMP/notes.md"
 
       - name: Publish release
-        if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           gh release create "$GITHUB_REF_NAME" "$DIST"/* \
@@ -297,19 +361,3 @@ jobs:
             --title "Minnas $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --verify-tag
-
-      - name: Upload artifact (dry run)
-        if: github.ref_type != 'tag' || !(github.event_name == 'push' || inputs.publish)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ${{ steps.version.outputs.artifact }}
-          path: ${{ env.DIST }}
-          if-no-files-found: error
-
-      - name: Remove the signing keychain (fallback)
-        if: always()
-        run: |
-          if [[ -f "$KEYCHAIN" ]]; then
-            security delete-keychain "$KEYCHAIN" || rm -f "$KEYCHAIN"
-          fi
-          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/AuthKey.p8"
