@@ -265,9 +265,10 @@ them. `defaultModel`, `cloudTranscriptionEnabled`, `calendarSource` and
 `onboardingCompleted` have no variable.
 
 The app's own code talks to one network endpoint, OpenAI's, fixed to
-`https://api.openai.com`, and only when cloud transcription is on, so there
-are no server addresses to configure. The model libraries download their
-models from Hugging Face; see Privacy below.
+`https://api.openai.com`, so there are no server addresses to configure. It
+is used for cloud transcription and for "Test Key", both with your own key;
+see Privacy below. The model libraries download their models from Hugging
+Face.
 
 ## Privacy
 

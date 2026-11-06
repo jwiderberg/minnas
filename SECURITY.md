@@ -65,9 +65,10 @@ fixed.
      (WhisperKit) loads a speech model (once per launch), a request for the
      model's file list to check the cached copy. No audio, transcripts or
      personal data are part of these requests.
-  2. OpenAI, with your own key, only after you turn on cloud transcription:
-     the audio of a recording that is transcribed with the cloud model, and
-     the key alone when you press "Test Key".
+  2. OpenAI, with your own key: the audio of a recording that is transcribed
+     with the cloud model (in the app only after you turn on cloud
+     transcription; the command-line harnesses take an explicit `--model` as
+     the consent), and the key alone when you press "Test Key".
 - It never sends audio, transcripts or calendar data anywhere else. Calendar
   attendees (names and email addresses) of a tagged recording are stored in
   that recording's `meta.json` on your Mac.
