@@ -8,45 +8,52 @@ pick. "Minnas" is Swedish for "to remember".
 
 ## Why
 
-Three reasons, in the order they annoyed me.
+I work across many platforms: Teams, Zoom, Meet... Each platform's own notes
+feature covers that platform only and needs its own licence: Teams'
+intelligent recap wants Teams Premium or a Microsoft 365 Copilot seat
+([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)),
+Meet's "Take notes for me" wants a Gemini or AI Meetings add-on on the
+organiser's account, so a guest gets nothing
+([Google Meet help](https://support.google.com/meet/answer/14754931)).
 
-Bots in calls. The note-taking services work by joining the meeting as a
-participant, and other people's bots join yours, sometimes for meetings
-their owner isn't attending. In August 2025 Otter.ai was sued by a man who
-had never had an Otter account; another attendee's bot had recorded him on a
-Zoom call
+Then there's the bots in calls, with note-taking services joining the
+meeting as a participant, and other people's bots joining yours (sometimes
+for meetings their owner isn't attending).
+
+In August 2025 Otter.ai was sued by a man who had never had an Otter
+account; another attendee's bot had recorded him on a Zoom call
 ([NPR](https://www.npr.org/2025/08/15/g-s1-83087/otter-ai-transcription-class-action-lawsuit)).
 The University of Washington blocked Read AI from its Zoom and Teams because
 the bot was sitting in meetings its own users had skipped
 ([UW-IT](https://it.uw.edu/guides/security-authentication/read-ai-deactivation/)).
 Teams now puts unregistered bots in a lobby bucket labelled "Suspected
 threats" and makes the organiser confirm each one
-([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/));
-Meet tags third-party bots at the door
+([SecurityWeek](https://www.securityweek.com/microsoft-adds-new-teams-controls-to-block-unauthorized-ai-bots-from-meetings/)),
+and Meet tags third-party bots at the door
 ([UC Today](https://www.uctoday.com/security-compliance-risk/google-meet-launches-update-to-better-screen-suspicious-bots/)).
-The audio is already coming out of the Mac. There is nothing to join.
 
-Hardware with a plan attached. The AI recorders avoid the bot by selling you
-a device, then meter the transcription. A Plaud comes with 300 minutes a
-month; after that it's $8.33 a month for Pro or $20 for Unlimited, billed
-yearly, more if monthly
+More recently there's hardware with a plan attached. The AI recorders avoid
+the bot by selling you a device, then charge for the transcription. A Plaud
+comes with 300 minutes a month; after that it's $8.33 a month for Pro or $20
+for Unlimited, billed yearly, more if monthly
 ([Plaud pricing](https://www.plaud.ai/pages/plaud-ai-plan-pricing)).
-The audio goes to their servers and the device is a key to the
-subscription. The Mac I'm recording on runs Whisper on its own Neural
-Engine.
+The audio goes to their servers and, like Whoop, the device is just a key to
+the subscription.
 
-Teams, Zoom and Meet at once. Okta's Businesses at Work report found 45% of
-its Microsoft 365 customers also ran Zoom
-([Zoom's summary of the 2022 report](https://www.zoom.com/en/blog/zoom-okta-2022-businesses-at-work-report/)).
-Each platform's own notes feature covers that platform only and needs its
-own licence: Teams' intelligent recap wants Teams Premium or a Microsoft 365
-Copilot seat
-([Microsoft Learn](https://learn.microsoft.com/en-us/microsoftteams/intelligent-recap-calls-meetings)),
-Meet's "Take notes for me" wants a Gemini or AI Meetings add-on on the
-organiser's account, so a guest gets nothing
-([Google Meet help](https://support.google.com/meet/answer/14754931)).
-I wanted one folder of Markdown files, one per meeting, whatever the meeting
-ran on.
+Either way, you're likely to end up with a multitude of services holding
+your transcripts, offering no integration or standard formats (at best
+tedious manual workarounds) across services, bots and hardware. Which all
+sucks if you, like me, work across many platforms.
+
+At the same time, all the audio is already coming out of your MacBook with
+Apple silicon, which runs Whisper on its own Neural Engine. And your old
+iPhone has excellent microphones, ample storage with iCloud sync, and the
+Voice Memos app.
+
+Minnas came about as a solution to cut through the platform lock-in
+nonsense, reuse your phone as the hardware for physical meetings, and keep
+all your transcriptions, regardless of platform, local and in an open format
+(Markdown) you can dump in Obsidian, Claude Desktop, etc.
 
 ## What it does
 
