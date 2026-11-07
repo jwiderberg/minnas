@@ -1,9 +1,8 @@
 //
-// The default URL cache at ~/Library/Caches/<bundle id>/Cache.db keeps
-// request headers and bodies, which here means an API key and meeting
-// audio, so HTTP traffic uses an ephemeral, cache-free session. Redirects
-// are also refused so a 307 can never re-POST audio or a bearer header to
-// another host. Never use URLSession.shared.
+// The default URL cache at ~/Library/Caches/<bundle id>/Cache.db was found
+// holding Authorization headers and full ingest bodies, so sensitive HTTP
+// traffic uses an ephemeral, cache-free session. Redirects are also refused
+// so a 307 can never re-POST a transcript or bearer header to another host.
 //
 
 import Foundation

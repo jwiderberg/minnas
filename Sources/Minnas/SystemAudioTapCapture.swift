@@ -552,7 +552,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             aggregateID = newAggregate
 
             // The tap's stream comes after the sub-device's own input
-            // streams (a USB headset or a virtual audio device has some; speakers don't).
+            // streams (a USB headset or a virtual device has some; speakers don't).
             let inputStreams = try CoreAudioHAL.getArray(newAggregate, kAudioDevicePropertyStreams, AudioObjectID.self,
                                                          scope: kAudioObjectPropertyScopeInput, step: "read aggregate input streams")
             let outputStreams = (try? CoreAudioHAL.getArray(newAggregate, kAudioDevicePropertyStreams, AudioObjectID.self,

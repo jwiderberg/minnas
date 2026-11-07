@@ -1,13 +1,15 @@
 //
-// Exponential-backoff schedule for the delivery auto-retry timer.
+// Exponential-backoff schedule for the auto-retry timer (mr#3).
 //
 // Per-recording, per-sink state lives on `RecordingMeta`
-// (delivery_attempts[sink id]) so the schedule survives app restarts. The timer ticks every 5 min; on each tick
+// (delivery_attempts[sink id]; an upload sink falls back to the older
+// upload_attempt_count + last_upload_attempt_at) so the schedule survives
+// app restarts. The timer ticks every 5 min; on each tick
 // SinkDispatcher asks `RetrySchedule.isDue(...)` whether a sink's next
 // attempt window for a recording has elapsed.
 //
-// Schedule: 5 → 10 → 30 → 60 min, capping at 60.
-// `attempt_count == 0` means we've never tried — fire on the
+// Schedule (per the issue spec): 5 → 10 → 30 → 60 min, capping at 60.
+// `upload_attempt_count == 0` means we've never tried — fire on the
 // next tick. After the 1st failure (count==1), wait 5 min from the
 // last attempt before the next try; after the 2nd, 10 min; etc.
 //

@@ -1,7 +1,7 @@
 //
 // Read-only access to the iPhone Voice Memos library that iCloud syncs to
 // this Mac, so a memo recorded on the phone can be imported like any other
-// recording (title of our choosing, transcript, the transcripts folder).
+// recording (title of our choosing, transcript, delivery).
 //
 // Where things live (macOS 26 / iOS 26):
 //   ~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings/

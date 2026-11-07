@@ -14,9 +14,9 @@
 // configuration changes under it — plugging in AirPods, the default
 // output switching, the voice-processing aggregate device being torn
 // down — and posts AVAudioEngineConfigurationChange. It never restarts on
-// its own. Unhandled, that silently kills the mic for the rest of a
-// recording (AirPods connect → default output changes → VPIO aggregate torn
-// down → engine stopped, while the menubar keeps showing "recording").
+// its own. Unhandled, that silently kills the mic track when headphones
+// connect (default output changed → VPIO aggregate torn down → engine
+// stopped) while the app keeps showing "recording"; see CLAUDE.md.
 // So: on that notification, and from a watchdog that notices the engine
 // not running / not delivering buffers, the tap is torn down and
 // re-attached. The gap is padded with silence so the mic track stays
@@ -403,7 +403,7 @@ final class MicCapture: @unchecked Sendable {
         // actor-isolated context: a closure formed inside this @MainActor
         // method inherits main-actor isolation, and Swift's runtime check
         // then traps the first time the audio thread calls it (SIGTRAP in
-        // dispatch_assert_queue — seen in the --mic-test harness).
+        // dispatch_assert_queue — reproduced with the --mic-test harness).
         input.installTap(onBus: 0, bufferSize: 4096, format: format,
                          block: Self.tapBlock(stats: stats, audioFile: audioFile, needsMonoCopy: needsMonoCopy,
                                               monoInputFormat: monoInputFormat, converter: converter,

@@ -5,10 +5,11 @@
 //
 // Reads a slot's meta + audio, resolves ONE language over both streams (so
 // mic and system never disagree), transcribes each stream, builds the
-// transcript, and writes transcript.md then meta.json (in that order — see
-// finish). It does NOT deliver or compress — the caller owns those side
-// effects (the UI path delivers + compresses; the CLI path deliberately
-// does neither).
+// transcript, and writes transcript.md, then every registered sink's
+// artifacts (TranscriptSink.writeArtifacts), then meta.json (in that order —
+// see finish). It does
+// NOT deliver or compress — the caller owns those side effects (the UI path
+// delivers + compresses; the CLI path deliberately does neither).
 //
 // Progress: `onProgress` reports a 0…1 fraction for the whole job — mic
 // spans 0–50% and system 50–100%, or mic spans the full 0–100% when the
@@ -23,11 +24,14 @@ private let jobLog = Logger(subsystem: "com.jwiderberg.minnas", category: "Trans
 enum TranscriptionJob {
     enum JobError: Error, CustomStringConvertible {
         case noAudio(String)
+        case cloudRefusedForLocalOnly(String)
         case badSegmentTimes(index: Int, start: Float, end: Float)
         var description: String {
             switch self {
             case .noAudio(let slug):
                 return "no audio to transcribe for \(slug): neither stream file exists"
+            case .cloudRefusedForLocalOnly(let model):
+                return "refused: this recording is local-only and \(model) runs in the cloud. Pass --force-cloud (CLI) to send it anyway."
             case .badSegmentTimes(let index, let start, let end):
                 return "transcript segment \(index) has bad times (start \(start), end \(end)); nothing was written"
             }
@@ -38,11 +42,17 @@ enum TranscriptionJob {
     static func run(
         slot: OutboxSlot,
         model: TranscriptionModel = .default,
+        allowCloudForLocalOnly: Bool = false,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> TranscriptBuilder.Output {
         // Reload meta from disk so the call is decoupled from any in-memory
         // RecordingSession state (which stop() may have cleared).
         let meta = try Outbox.readMeta(from: slot.metaURL)
+        // The 🔒 local-only promise is enforced here, not only in the menu:
+        // every path that transcribes (menu, CLI, recovery) goes through run.
+        if meta.local_only == true, model.engine == .openAI, !allowCloudForLocalOnly {
+            throw JobError.cloudRefusedForLocalOnly(model.rawValue)
+        }
 
         // Local engines don't separate speakers; the "Them" stream (or a
         // single-stream import, where everyone is in one file) gets a
@@ -145,7 +155,7 @@ enum TranscriptionJob {
 
     /// The build → persist half, shared with the Voice Memos import, which
     /// already has STT results (Apple's embedded transcript) and only needs
-    /// transcript.md + meta.json written.
+    /// transcript.md, the sinks' artifacts and meta.json written.
     @discardableResult
     static func finish(
         slot: OutboxSlot,
@@ -165,22 +175,24 @@ enum TranscriptionJob {
         // transcript ordered by it would be nonsense. The audio stays, so
         // the recording can be re-transcribed.
         try checkSegments(output.segments)
-        // ORDERING INVARIANT (SinkDispatcher relies on it): transcript.md is
-        // written FIRST, meta.json — which resets every sink's delivery to
-        // pending — LAST. Written the other way round, a retry tick (or
-        // `--deliver`) landing between the meta write and the transcript
-        // write would see "pending" and deliver the PREVIOUS transcript as if
-        // it were this generation, then mark it delivered. Now a tick in
+        // ORDERING INVARIANT (SinkDispatcher relies on it): transcript.md and
+        // every sink's artifacts are written FIRST, meta.json — which resets
+        // every sink's delivery to pending — LAST. Written the other way
+        // round, a retry tick (or `--deliver`) landing between the meta write
+        // and an artifact write saw "pending" and delivered the PREVIOUS
+        // artifact as if it were this generation, then marked it delivered.
+        // Now a tick in
         // that window sees the old meta: either still delivered (nothing
-        // sent), or pending and sending the new file, recorded against the
+        // sent), or pending and sending the new files, recorded against the
         // old generation and so re-sent once the reset lands. The stamp is
-        // taken before the file is written, so its mtime is ≥ it; the
+        // taken before any file is written, so every mtime is ≥ it; the
         // dispatcher refuses a required file older than the stamp.
         let writtenAt = Date()
 
-        // Everything this generation changes in meta, applied under the meta
-        // lock at the end to whatever is on disk then (so a field another
-        // path wrote during a long transcription — a delivery — survives).
+        // Everything this generation changes in meta, applied twice: to a
+        // projection for the sinks' artifacts now, and under the meta lock
+        // at the end to whatever is on disk then (so a field another path
+        // wrote during a long transcription — a delivery, a retag — survives).
         func apply(_ m: inout RecordingMeta) {
             m.title = meta.title
             // Keep the prior pass's languages if this engine reported none
@@ -194,8 +206,15 @@ enum TranscriptionJob {
             // via the location resetDeliveries keeps in previous_locations.
             m.resetDeliveries()
         }
+        var projected = (try? Outbox.readMeta(from: slot.metaURL)) ?? meta
+        apply(&projected)
 
         try output.markdown.write(to: slot.transcriptURL, atomically: true, encoding: .utf8)
+        // Every sink the build registers, configured or not (the Markdown
+        // folder writes nothing here: it copies transcript.md at delivery).
+        for sink in BuildFlavor.sinks {
+            try sink.writeArtifacts(slot: slot, meta: projected, output: output)
+        }
         // Last. `meta` (as the job began) stands in only if meta.json has
         // become unreadable.
         try Outbox.mutateMeta(slot, ifUnreadable: meta, apply)

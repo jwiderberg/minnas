@@ -504,11 +504,11 @@ if let idx = CommandLine.arguments.firstIndex(of: "--deliver") {
         var line = "  \(sink.id) (\(sink.displayName)): "
         if !sink.applies(to: meta) {
             line += "not applicable"
-        } else if meta.isDelivered(to: sink.id) {
-            let location = meta.deliveries?[sink.id]?.location
+        } else if sink.isDelivered(meta) {
+            let location = sink.location(meta)
             line += "delivered\(location.map { " → \($0)" } ?? "")"
         } else {
-            let attempt = meta.attempt(for: sink.id)
+            let attempt = sink.attempt(meta)
             line += "pending, \(SinkDispatcher.isDue(sink, meta: meta) ? "due" : "not due") (attempts \(attempt.attempt_count))"
             if let folderSink = sink as? MarkdownFolderSink {
                 line += " → \(folderSink.plannedDestination(slot: slot, meta: meta).path)"
@@ -742,7 +742,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--detect-lang") {
 }
 
 // Dev: report the mic/system envelope correlation for a stored recording,
-// to calibrate the duplicate-stream threshold.
+// to calibrate the duplicate-stream threshold (mr#10).
 //   minnas --dup-check <slug>
 if let idx = CommandLine.arguments.firstIndex(of: "--dup-check") {
     let args = CommandLine.arguments
@@ -809,7 +809,7 @@ if CommandLine.arguments.contains("--self-test") {
         }
     }
 
-    // ─────── RetrySchedule ───────
+    // ─────── RetrySchedule (mr#3) ───────
 
     // First attempt is always due.
     check(

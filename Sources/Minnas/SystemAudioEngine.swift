@@ -19,6 +19,8 @@ import Foundation
 import Synchronization
 
 /// The `systemAudioEngine` setting (SYSTEM_AUDIO_ENGINE).
+/// Case order is the order Settings and --settings list them in; each
+/// build lists its default first.
 enum SystemAudioEngineKind: String, Sendable, CaseIterable {
     /// Core Audio process tap (SystemAudioTapCapture). The default.
     case taps

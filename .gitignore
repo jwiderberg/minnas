@@ -17,7 +17,7 @@ DerivedData/
 !.env.example
 secrets/
 
-# Runtime state if a dev run ever points here (the app itself uses ~/Library/Application Support/minnas)
+# Recordings buffer (audio files queued before upload, kept local-only)
 outbox/
 recordings/
 

@@ -278,7 +278,7 @@ enum Setting {
         format: { $0 }, display: { $0 },
         "Transcription language: auto (detect among sttLanguages) or a pinned code.")
     static let sttLanguages: SettingSpec<[String]> = .list(
-        .sttLanguages, env: "STT_LANGUAGES", default: ["en"], lowercase: true, emptyIsDefault: true,
+        .sttLanguages, env: "STT_LANGUAGES", default: BuildFlavor.defaultSTTLanguages, lowercase: true, emptyIsDefault: true,
         "Candidate languages for auto detection, primary first.")
     static let sttLanguageMargin: SettingSpec<Float> = .float(
         .sttLanguageMargin, env: "STT_LANGUAGE_MARGIN", default: 0.2,
@@ -293,12 +293,12 @@ enum Setting {
         .calendarSource, env: nil, default: .off,
         "Where upcoming meetings come from: off, or eventkit (the macOS Calendar app's accounts).")
     static let systemAudioExcludedBundleIDs: SettingSpec<[String]> = .list(
-        .systemAudioExcludedBundleIDs, env: "SYSTEM_AUDIO_EXCLUDE_BUNDLES", default: [],
+        .systemAudioExcludedBundleIDs, env: "SYSTEM_AUDIO_EXCLUDE_BUNDLES", default: BuildFlavor.defaultExcludedBundleIDs,
         lowercase: false, emptyIsDefault: false,
         display: { $0.isEmpty ? "(none)" : $0.joined(separator: ",") },
         "Apps whose audio is kept out of the system (\"Them\") track.")
     static let systemAudioEngine: SettingSpec<SystemAudioEngineKind> = .choice(
-        .systemAudioEngine, env: "SYSTEM_AUDIO_ENGINE", default: .taps,
+        .systemAudioEngine, env: "SYSTEM_AUDIO_ENGINE", default: BuildFlavor.defaultSystemAudioEngine,
         "System-audio capture: taps (Core Audio process tap, needs only System Audio Recording) or sck (ScreenCaptureKit, needs Screen Recording).")
     static let diarizeEnabled: SettingSpec<Bool> = .bool(
         .diarizeEnabled, env: "DIARIZE", default: true,

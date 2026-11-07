@@ -62,7 +62,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
     static var suggestedFolder: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/Minnas Transcripts", isDirectory: true)
+            .appendingPathComponent("Documents/\(BuildFlavor.suggestedTranscriptsFolderName)", isDirectory: true)
     }
 
     /// `onDone` runs once, when the window closes — finished or not.

@@ -4,16 +4,18 @@
 //
 // "Pending" for a sink = it is active, applies to the recording, and has
 // not delivered it. A recording is ready for a sink once every file that
-// sink reads (requiredFiles: transcript.md for the folder sink) exists and
-// is no older than meta's transcript_written_at.
+// sink reads (requiredFiles: transcript.md for the folder sink, whatever a
+// build's own sink names) exists and is no older than meta's
+// transcript_written_at.
 //
-// The one sink today is MarkdownFolderSink. Another destination is one new
-// TranscriptSink type plus a line in activeSinks(); the per-sink state in
-// meta (deliveries, delivery_attempts, previous_locations) and the retry
-// backoff already key on the sink id.
+// Which sinks exist: the Markdown folder (every build) plus BuildFlavor.sinks
+// (the build's own). Delivery state is read through the sink (isDelivered,
+// attempt) and a sink with older fields of its own keeps them in step
+// through didRecordDelivery / didRecordAttempt.
 //
 // Ordering invariant with TranscriptionJob.finish: finish writes
-// transcript.md FIRST and the meta.json that resets the deliveries LAST. So whenever meta says "this generation is pending", the
+// transcript.md and every sink's artifacts FIRST and the meta.json that
+// resets the deliveries LAST. So whenever meta says "this generation is pending", the
 // files on disk are already that generation's; the mtime check is the
 // second fence, against a file left over from an earlier generation (a
 // write that failed half-way, an older build).
@@ -56,11 +58,28 @@ enum SinkDispatcher {
     private static let undecodableLogged = OSAllocatedUnfairLock(initialState: Set<String>())
 
     /// The sinks configured right now. Read fresh on every call: the folder
-    /// can change in Settings while the app runs.
+    /// and a sink's own configuration can change in Settings while the app
+    /// runs.
     static func activeSinks() -> [any TranscriptSink] {
         var sinks: [any TranscriptSink] = []
         if let folder = Config.transcriptsFolderURL() { sinks.append(MarkdownFolderSink(folder: folder)) }
+        sinks.append(contentsOf: BuildFlavor.sinks.filter { $0.isConfigured })
         return sinks
+    }
+
+    /// The build's own sink with this id, if it registers one.
+    static func registeredSink(id: String) -> (any TranscriptSink)? {
+        BuildFlavor.sinks.first { $0.id == id }
+    }
+
+    /// The sinks a recording can be owed to, for pruning: `active` plus
+    /// every registered sink that keeps its obligation while unconfigured
+    /// (keepsOwedSlotsWhenUnconfigured), so one launch without its
+    /// configuration doesn't make its undelivered recordings deletable.
+    static func owedSinks(active: [any TranscriptSink]) -> [any TranscriptSink] {
+        active + BuildFlavor.sinks.filter { sink in
+            sink.keepsOwedSlotsWhenUnconfigured && !active.contains { $0.id == sink.id }
+        }
     }
 
     static func pendingSinks(for meta: RecordingMeta) -> [any TranscriptSink] {
@@ -68,11 +87,11 @@ enum SinkDispatcher {
     }
 
     static func pendingSinks(for meta: RecordingMeta, among sinks: [any TranscriptSink]) -> [any TranscriptSink] {
-        sinks.filter { $0.applies(to: meta) && !meta.isDelivered(to: $0.id) }
+        sinks.filter { $0.applies(to: meta) && !$0.isDelivered(meta) }
     }
 
     static func isDue(_ sink: any TranscriptSink, meta: RecordingMeta, now: Date = Date()) -> Bool {
-        let attempt = meta.attempt(for: sink.id)
+        let attempt = sink.attempt(meta)
         return RetrySchedule.isDue(attemptCount: attempt.attempt_count, lastAttemptAt: attempt.last_attempt_at, now: now)
     }
 
@@ -108,19 +127,21 @@ enum SinkDispatcher {
     }
 
     /// One attempt for every pending sink that is due. `ignoringSchedule`
-    /// is for a user-initiated retry.
+    /// is for a user-initiated retry; `excluding` skips sinks by id (the
+    /// app holds a sink back while its token is known bad).
     static func deliverPending(
         slot: OutboxSlot,
         now: Date = Date(),
-        ignoringSchedule: Bool = false
+        ignoringSchedule: Bool = false,
+        excluding: Set<String> = []
     ) async -> [DeliveryOutcome] {
-        let sinks = activeSinks()
+        let sinks = activeSinks().filter { !excluding.contains($0.id) }
         var outcomes: [DeliveryOutcome] = []
         for sink in sinks {
             // Fresh meta per sink: the previous sink's write is on disk, and
-            // fail closed — unreadable meta is never delivered.
+            // fail closed — unreadable meta might be local-only.
             guard let meta = readMetaOrLogOnce(slot),
-                  sink.applies(to: meta), !meta.isDelivered(to: sink.id),
+                  sink.applies(to: meta), !sink.isDelivered(meta),
                   isReady(sink, slot: slot, meta: meta),
                   ignoringSchedule || isDue(sink, meta: meta, now: now) else { continue }
             let result: Result<SinkDelivery, any Error>
@@ -134,9 +155,10 @@ enum SinkDispatcher {
         return outcomes
     }
 
-    /// The one place a delivery's result lands in meta.json; a caller that
-    /// drives a sink directly must record through it too. `deliveredMeta`
-    /// is the meta the delivery was made from: if a re-transcribe replaced the transcript meanwhile, a success
+    /// The one place a delivery's result lands in meta.json — the dispatcher
+    /// and `--retag` (whose forced upload calls its sink directly) both
+    /// record through it. `deliveredMeta` is the meta the delivery was made
+    /// from: if a re-transcribe replaced the transcript meanwhile, a success
     /// is NOT recorded as delivered, only its location is remembered.
     @discardableResult
     static func recordOutcome(
@@ -151,6 +173,7 @@ enum SinkDispatcher {
             updateMeta(slot) { current in
                 if current.transcription?.transcribed_at == transcribedAt {
                     current.recordDelivery(delivery, for: sink.id)
+                    sink.didRecordDelivery(delivery, in: &current)
                 } else if let location = delivery.location {
                     var previous = current.previous_locations ?? [:]
                     previous[sink.id] = location
@@ -159,9 +182,12 @@ enum SinkDispatcher {
             }
             dispatchLog.notice("delivered \(slot.slug, privacy: .public) → \(sink.id, privacy: .public)")
         case .failure(let error):
-            updateMeta(slot) { $0.recordAttempt(for: sink.id) }
-            // Error text can echo transcript content or a home-folder path:
-            // private. The sink id stays readable.
+            updateMeta(slot) { current in
+                let next = current.recordAttempt(for: sink.id)
+                sink.didRecordAttempt(next, in: &current)
+            }
+            // Error text can echo transcript content (a 422 body) or a
+            // home-folder path: private. The sink id stays readable.
             dispatchLog.error("delivery of \(slot.slug, privacy: .public) → \(sink.id, privacy: .public) failed: \(String(describing: error), privacy: .private)")
         }
         return DeliveryOutcome(sinkID: sink.id, sinkName: sink.displayName, result: result)

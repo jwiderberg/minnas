@@ -207,9 +207,9 @@ enum TranscriptBuilder {
         // 16-minute wall of text under one header.
         let pauseBreak: Float = 2.0
         let lengthBreak = 800
-        // Structured rows (the harnesses print them; TranscriptionJob checks
-        // their times), built from the same normalized text as the markdown
-        // so the two stay in sync.
+        // Structured rows (transcript_segments) for delivery payloads, built
+        // from the same normalized text as the markdown so the two stay in
+        // sync.
         var segments: [TranscriptSegment] = []
         for seg in all {
             let text = cleanText(seg.text, language: seg.language)
@@ -295,7 +295,9 @@ enum TranscriptBuilder {
         guard others.count == 1,
               let raw = others.first?.name?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return nil }
-        return String(Outbox.normalizeTitle(raw).prefix(100))
+        // Trim after the cut: the 100th character may be a space.
+        let name = String(Outbox.normalizeTitle(raw).prefix(100)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
     }
 
     /// Detects Whisper's stock-phrase hallucinations on silence.

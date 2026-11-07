@@ -28,7 +28,7 @@ enum AudioRoute {
     }
 
     /// Human-readable name of the current default input device (e.g.
-    /// "MacBook Pro Microphone", "iPhone Microphone"). nil if it
+    /// "MacBook Pro Microphone", "<name> iPhone Microphone"). nil if it
     /// can't be read. Used to warn when capture is coming from a device
     /// likely to deliver silence (an iPhone Continuity mic on a call, a
     /// virtual device).

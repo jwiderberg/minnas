@@ -3,8 +3,7 @@
 // `--cleanup-test` harness (main.swift) and the swift-testing suite
 // (Tests/MinnasTests/TranscriptBuilderTests.swift), so the two
 // cannot drift. Add a line here when Whisper invents a new kind of credit or
-// when the filter eats real speech. Every name below is a synthetic
-// fixture.
+// when the filter eats real speech.
 //
 
 enum TranscriptBuilderFixtures {
@@ -50,7 +49,7 @@ enum TranscriptBuilderFixtures {
         "Thank you so much for taking the time today, Sam, I really appreciate it.",
         "Tack så mycket för att ni kunde komma idag, vi börjar med en kort runda.",
         "(We should probably move on to the next question, don't you think?)",
-        // Dropped by the regexes before 2026-11-07.
+        // Dropped by the regexes before 2026-11-07 (review D7).
         "Transcription from yesterday is attached",
         "Translation from Swedish takes longer",
         "Text from the slide says revenue is up",

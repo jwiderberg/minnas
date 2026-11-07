@@ -115,7 +115,7 @@ final class RecordingSession {
         guard !isRunning else { throw RecordingSessionError.alreadyRunning }
 
         // Calendar titles are whatever the organiser typed; bound them here
-        // so meta, the menu and the transcript all carry the same one line.
+        // so meta, the menu and the payload all carry the same one line.
         let title = Outbox.normalizeTitle(title)
         let startedAt = Date()
         let slot = try Outbox.makeSlot(title: title, startedAt: startedAt)

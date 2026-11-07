@@ -41,7 +41,8 @@ enum AudioFileImporter {
     static let allowedContentTypes: [UTType] = [.audio, .movie]
 
     /// Default title: the file's name without extension, underscores and
-    /// turned into spaces ("2026-01-15 Team_sync" → "2026-01-15 Team sync").
+    /// dashes turned into spaces ("2026-01-15 Team_sync" → "2026-01-15 Team
+    /// sync").
     static func defaultTitle(for url: URL) -> String {
         url.deletingPathExtension().lastPathComponent
             .replacingOccurrences(of: "_", with: " ")

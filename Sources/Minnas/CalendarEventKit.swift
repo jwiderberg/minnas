@@ -18,8 +18,8 @@ import EventKit
 import Foundation
 
 /// One soon-to-start (or just-started) meeting, as the poll and the picker
-/// see it.
-struct UpcomingEvent: Sendable {
+/// see it. Codable so a server calendar source can decode it as is.
+struct UpcomingEvent: Codable, Sendable {
     let calendar_event_id: String?
     let ical_uid: String?
     let title: String?
@@ -106,7 +106,8 @@ enum EventKitCalendar {
 
     /// eventIdentifier is shared by every occurrence of a recurring event,
     /// so the occurrence's start is appended: the poll's "already prompted"
-    /// set needs one id per meeting, not per series. Stable across polls and relaunches for the same occurrence.
+    /// set needs one id per meeting, not per series. Stable across polls and
+    /// relaunches for the same occurrence.
     private static func stableID(for event: EKEvent) -> String {
         let base = event.eventIdentifier ?? event.calendarItemIdentifier
         return "eventkit:\(base)@\(Int(event.startDate.timeIntervalSince1970))"

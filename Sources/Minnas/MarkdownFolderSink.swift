@@ -1,7 +1,7 @@
 //
 // Exports each finished transcript as a Markdown file into a folder the
-// user picked (TRANSCRIPTS_DIR / Settings) — where Minnas puts every
-// transcript.
+// user picked (TRANSCRIPTS_DIR / Settings) — the open-source build's
+// default destination, and the only one that needs no server.
 //
 // File name: "<yyyy-MM-dd HHmm> <title>.md", the meeting's local start time
 // so the folder sorts chronologically in Finder. Content: transcript.md
@@ -38,7 +38,7 @@ struct MarkdownFolderSink: TranscriptSink {
     var id: String { Self.sinkID }
     var displayName: String { "Markdown folder" }
 
-    // Local by definition, so every recording is exported.
+    // Local by definition, so 🔒 local-only recordings are exported too.
     func applies(to meta: RecordingMeta) -> Bool { true }
 
     func deliver(slot: OutboxSlot, meta: RecordingMeta) async throws -> SinkDelivery {

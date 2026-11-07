@@ -3,15 +3,21 @@
 //
 // Layout (per recording):
 //   outbox/<slug>/
-//     system.caf     — system audio capture (process tap or ScreenCaptureKit)
+//     system.caf     — system audio capture (ScreenCaptureKit or process tap)
 //     mic.caf        — microphone capture (AVAudioEngine)
 //     mic.m4a / system.m4a — the compressed audio, once transcribed
 //     meta.json      — recording metadata + per-sink delivery state
 //     transcript.md  — the transcript, with YAML frontmatter
+//     …              — whatever a build's own sink writes at transcription
+//                      time (TranscriptSink.writeArtifacts)
 //
 // `slug` is `<YYYY-MM-DD>-<HHMM>-<sanitized-title>`. The date/time prefix
 // makes alphabetical sort = chronological sort; the title suffix is just
 // for human eyeballing of outbox/.
+//
+// `meta.json` field names double as the wire names a delivery sink sends,
+// so a payload built from meta is a near-direct copy and a contract guard
+// can grep for the same names.
 //
 
 import AVFoundation
@@ -47,14 +53,14 @@ extension OutboxSlot {
     /// Every audio file the slot can hold, raw and compressed.
     var audioURLs: [URL] { [micAudioURL, systemAudioURL, micCompressedURL, systemCompressedURL] }
 
-    /// Whether any audio is left. A slot past the retention window keeps
-    /// only its transcript, so it can no longer be re-transcribed.
+    /// Whether any audio is left. A local-only slot past the retention
+    /// window keeps only its transcript, so it can no longer be re-transcribed.
     var hasAudio: Bool { audioURLs.contains { FileManager.default.fileExists(atPath: $0.path) } }
 }
 
 /// A meeting participant, from the calendar event the recording was
-/// tagged with (EventKit). Stored in meta.json; the transcript itself only
-/// ever shows a name (the "Them" speaker of a 1:1).
+/// tagged with. Stored in meta.json; the transcript itself only ever shows
+/// a name (the "Them" speaker of a 1:1).
 struct Attendee: Codable, Sendable {
     var name: String?
     var email: String?
@@ -66,7 +72,9 @@ struct DetectedLanguage: Codable, Sendable {
 }
 
 /// How a transcript was produced. Recorded on every transcription run so
-/// a re-transcribe with a different model is self-describing.
+/// a re-transcribe with a different model is self-describing, and a
+/// delivery sink can tell the receiving side which engine/model the
+/// canonical transcript came from.
 struct TranscriptionProvenance: Codable, Sendable {
     var engine: String          // e.g. "whisperkit"
     var model: String           // TranscriptionModel.rawValue
@@ -74,49 +82,71 @@ struct TranscriptionProvenance: Codable, Sendable {
 }
 
 struct RecordingMeta: Codable, Sendable {
+    // Fields below map onto the /notes/ingest contract.
     var source: String = "meeting"
     var title: String
     var started_at: Date
     var ended_at: Date?
     var calendar_event_id: String?
     var calendar_event_url: String?
-    // From the calendar event when one is attached (nil otherwise). Used to
-    // name the other person in a 1:1 and to steer language detection.
+    // From the calendar event when one is attached (populated by the
+    // calendar integration; nil until then). A delivery sink may send them
+    // so the receiving side can resolve attendees without re-fetching.
     var attendees: [Attendee]?
     var languages_detected: [DetectedLanguage]?
     var device: String
     var client_version: String
-    // Audio is kept on this Mac until the retention window prunes it
-    // (Outbox.pruneOldRecordings).
+    // Audio stays on this Mac (compressed to m4a after transcription) until
+    // the retention window prunes it (Outbox.pruneOldRecordings), so this
+    // is true whenever a delivery payload is built; a sink may send it.
     var audio_retained: Bool = true
-    // Set after each (re-)transcription.
+    // Set after each (re-)transcription. A delivery sink may send it as the
+    // transcript's provenance.
     var transcription: TranscriptionProvenance?
     // Consecutive failed transcription attempts. Launch retry stops after
     // three so a permanently bad slot cannot loop on every app start.
     var transcription_failures: Int?
     // When TranscriptionJob.finish began writing this generation's
-    // transcript.md (stamped before it is written, saved in meta.json only
-    // after it is). SinkDispatcher refuses to deliver a file older than
-    // this, so a stale transcript can never go out as the current
-    // generation. nil = no check.
+    // transcript.md + the sinks' artifacts (stamped before any is written,
+    // saved in meta.json only after all are). SinkDispatcher refuses to
+    // deliver a file older than this, so a stale file can never go out as
+    // the current generation. nil on slots from before the field existed (no
+    // check). Recorder-local.
     var transcript_written_at: Date?
-    // Per-sink delivery state (TranscriptSink), keyed by sink id. Persisted
-    // so the retry backoff survives app restarts.
+    // Legacy delivery state of the upload sink that predates `deliveries`:
+    // delivered when uploaded_at is set, pending otherwise; the attempt
+    // counter and timestamp persist its retry backoff across launches. Kept
+    // so older meta.json decodes; that sink still reads and writes them
+    // through its isDelivered / attempt / record hooks. nil in builds
+    // without such a sink. Recorder-local.
+    var uploaded_at: Date?
+    var note_url: String?
+    var upload_attempt_count: Int?
+    var last_upload_attempt_at: Date?
+    // Per-sink delivery state (TranscriptSink), keyed by sink id. A sink
+    // may also honour older fields of its own (the legacy fields above)
+    // through its isDelivered / attempt. Recorder-local.
     var deliveries: [String: SinkDelivery]?
     var delivery_attempts: [String: DeliveryAttempt]?
     // Where each sink put the PREVIOUS transcript, kept when a re-transcribe
     // clears `deliveries`, so the folder sink overwrites its old file
-    // instead of leaving a stale copy next to a " (2)".
+    // instead of leaving a stale copy next to a " (2)". Recorder-local.
     var previous_locations: [String: String]?
+    // Privacy: when true the recording is kept + transcribed locally and
+    // never sent to an uploading sink, and a cloud model is refused for it.
+    // Set from the upload toggle at record time. Recorder-local.
+    var local_only: Bool?
     // How the audio was captured. nil = the normal two-stream capture (mic +
     // system). "voice_memo" = a single-stream phone recording imported from
     // the Voice Memos library: everyone is in one stream, so the transcript
     // labels speakers "Speaker" / "Speaker (A)" instead of Me/Them.
+    // Recorder-local; the wire payload carries it through `device`.
     var capture_kind: String?
     // For capture_kind "file_import": the original file's name, for the
-    // record.
+    // record. Recorder-local.
     var import_source: String?
-    // Post-mortem evidence for the capture layer, written at stop. How many times each stream had to be re-attached after the OS
+    // Post-mortem evidence for the capture layer, written at stop. Recorder-
+    // local. How many times each stream had to be re-attached after the OS
     // stopped it (route change, stream death), how much silence was padded
     // in to keep the streams aligned, and how much audio actually arrived.
     var capture_health: CaptureHealth?
@@ -148,13 +178,19 @@ extension RecordingMeta {
 }
 
 extension RecordingMeta {
+    /// Delivered to the sink with this id, as that sink judges it (a sink
+    /// the build registers may honour older fields of its own); any other
+    /// id is judged by `deliveries` alone. For callers holding an id, not a
+    /// sink (a delivery outcome, the menu).
     func isDelivered(to sinkID: String) -> Bool {
-        deliveries?[sinkID] != nil
+        if let sink = SinkDispatcher.registeredSink(id: sinkID) { return sink.isDelivered(self) }
+        return deliveries?[sinkID] != nil
     }
 
-    /// Backoff state for a sink (zero attempts when it never tried).
+    /// Backoff state for a sink, resolved the same way.
     func attempt(for sinkID: String) -> DeliveryAttempt {
-        delivery_attempts?[sinkID] ?? DeliveryAttempt(attempt_count: 0, last_attempt_at: nil)
+        if let sink = SinkDispatcher.registeredSink(id: sinkID) { return sink.attempt(self) }
+        return delivery_attempts?[sinkID] ?? DeliveryAttempt(attempt_count: 0, last_attempt_at: nil)
     }
 
     mutating func recordDelivery(_ delivery: SinkDelivery, for sinkID: String) {
@@ -170,13 +206,17 @@ extension RecordingMeta {
         if previous_locations?.isEmpty == true { previous_locations = nil }
     }
 
-    mutating func recordAttempt(for sinkID: String, at date: Date = Date()) {
+    /// Counts one failed attempt on top of the sink's current backoff state
+    /// and returns the new state.
+    @discardableResult
+    mutating func recordAttempt(for sinkID: String, at date: Date = Date()) -> DeliveryAttempt {
         var next = attempt(for: sinkID)
         next.attempt_count += 1
         next.last_attempt_at = date
         var all = delivery_attempts ?? [:]
         all[sinkID] = next
         delivery_attempts = all
+        return next
     }
 
     /// New transcript content supersedes every delivery: each sink must
@@ -190,6 +230,12 @@ extension RecordingMeta {
         previous_locations = previous.isEmpty ? nil : previous
         deliveries = nil
         delivery_attempts = nil
+        // The legacy delivery fields too, so a re-transcribed old recording
+        // is delivered again.
+        uploaded_at = nil
+        note_url = nil
+        upload_attempt_count = nil
+        last_upload_attempt_at = nil
     }
 }
 
@@ -214,7 +260,7 @@ enum Outbox {
         let fm = FileManager.default
         // The slug has minute resolution, so two recordings started in the
         // same minute with the same title would collide on one directory and
-        // the second would overwrite the first's meta and audio. Append -2, -3…
+        // the second would overwrite the first's meta/payload. Append -2, -3…
         // until the path is free.
         func create(base: String) throws -> URL {
             var slug = base
@@ -238,12 +284,11 @@ enum Outbox {
         }
     }
 
-    /// One-line, bounded title for meta and the transcript: every run of
+    /// One-line, bounded title for meta and payload: every run of
     /// whitespace or control characters (tabs, newlines, NEL, U+2028/2029)
     /// becomes one space, the ends are trimmed, and the result is capped at
-    /// 200 Characters — a title comes from whoever sent the invite, and it
-    /// ends up in a YAML frontmatter line, a heading and a file name.
-    /// Empty → "Meeting".
+    /// 200 Characters — the ingest contract's limit; a receiving side would
+    /// otherwise reject it on every retry. Empty → "Meeting".
     static func normalizeTitle(_ title: String) -> String {
         var scalars = String.UnicodeScalarView()
         for scalar in title.unicodeScalars {
@@ -277,8 +322,7 @@ enum Outbox {
 
     /// Persisted recordings on disk, newest first. A recording is any
     /// outbox subdirectory with a meta.json and either audio or a
-    /// transcript (a slot past the retention window keeps only the
-    /// transcript). The
+    /// transcript (a pruned local-only slot keeps only the transcript). The
     /// slug's date-time prefix makes a reverse string sort = newest-first.
     static func listSlots(limit: Int? = nil) -> [OutboxSlot] {
         let fm = FileManager.default
@@ -412,20 +456,8 @@ enum Outbox {
     }
 
     /// Prune recordings older than `keepDays`. keepDays == 0 disables it.
-    /// Nothing outside the outbox is ever touched — the transcripts folder
-    /// belongs to the user.
-    ///   - owed to an ACTIVE sink (the Markdown folder) that applies to it
-    ///     and hasn't delivered it: kept whole. The transcript (and for a
-    ///     re-transcribe, the audio) must survive until it has gone out.
-    ///     Startup runs recovery → prune → first delivery tick, so without
-    ///     this a folder export still owed would be deleted before it ever
-    ///     ran.
-    ///   - not transcribed yet: kept whole — the audio is all there is.
-    ///   - delivered somewhere (the folder holds the user's copy): the whole
-    ///     slot goes, audio and the outbox copy of the transcript.
-    ///   - transcribed but delivered nowhere (no folder chosen): only the
-    ///     audio goes. transcript.md here is the only copy, so it and
-    ///     meta.json stay.
+    /// Nothing outside the outbox is ever touched. What goes per slot is
+    /// pruneAction's rule (see there).
     static func pruneOldRecordings(keepDays: Int) {
         guard keepDays > 0 else { return }
         let fm = FileManager.default
@@ -442,7 +474,7 @@ enum Outbox {
                 for url in slot.audioURLs where fm.fileExists(atPath: url.path) {
                     do {
                         try fm.removeItem(at: url)
-                        outboxLog.info("pruned audio \(slot.slug, privacy: .public)/\(url.lastPathComponent, privacy: .public) (not delivered anywhere, older than \(keepDays, privacy: .public)d)")
+                        outboxLog.info("pruned audio \(slot.slug, privacy: .public)/\(url.lastPathComponent, privacy: .public) (audio only, older than \(keepDays, privacy: .public)d)")
                     } catch {
                         outboxLog.error("prune \(slot.slug, privacy: .public)/\(url.lastPathComponent, privacy: .public) failed: \(String(describing: error), privacy: .public)")
                     }
@@ -460,15 +492,61 @@ enum Outbox {
 
     enum PruneAction: Equatable { case keep, audioOnly, wholeSlot }
 
-    /// The pruning rule for one slot already past the cutoff, kept pure so
-    /// it can be checked without a real outbox.
+    /// The rule for this build: the sinks a slot can be owed to are the
+    /// active ones plus any of the build's sinks that stay owed while
+    /// unconfigured (SinkDispatcher.owedSinks), and the local-only switch is
+    /// BuildFlavor's.
     static func pruneAction(meta: RecordingMeta, hasTranscript: Bool, activeSinks: [any TranscriptSink]) -> PruneAction {
-        // Owed to a sink that is configured now: keep everything.
-        if !SinkDispatcher.pendingSinks(for: meta, among: activeSinks).isEmpty { return .keep }
+        pruneAction(meta: meta, hasTranscript: hasTranscript, sinks: SinkDispatcher.owedSinks(active: activeSinks), keepsOutboxTranscriptForLocalOnly: BuildFlavor.keepsOutboxTranscriptForLocalOnly)
+    }
+
+    /// The pruning rule for one slot already past the cutoff, kept pure so
+    /// it can be checked without a real outbox. First match wins:
+    ///
+    ///   1. a sink in `sinks` applies and hasn't delivered  → .keep
+    ///      (the transcript, and for a re-transcribe the audio, must survive
+    ///      until it has gone out; startup runs recovery → prune → first
+    ///      delivery tick, so without this an export still owed would be
+    ///      deleted before it ever ran)
+    ///   2. delivered somewhere — a `deliveries` entry, or a sink's
+    ///      isDelivered (an upload sink's legacy uploaded_at) — and NOT
+    ///      (local_only && keepsOutboxTranscriptForLocalOnly) → .wholeSlot
+    ///      (the destination holds the transcript)
+    ///   3. transcribed (meta.transcription, or transcript.md) → .audioOnly
+    ///      (transcript.md here may be the only copy; it and meta.json stay)
+    ///   4. otherwise                                         → .keep
+    ///      (the audio is all there is)
+    ///
+    /// Outcomes. Build with an upload sink registered (BuildFlavor.sinks,
+    /// counted even while unconfigured, so a launch with a misspelt secret
+    /// deletes nothing; flag true):
+    ///
+    ///   local_only  uploaded     active sink owed  transcribed  →
+    ///   no          no           –                 –            keep (1: upload sink owed)
+    ///   no          yes          yes               –            keep (1)
+    ///   no          yes          no                –            wholeSlot (2)
+    ///   yes         –            yes               –            keep (1)
+    ///   yes         –            no                yes          audioOnly (3)
+    ///   yes         –            no                no           keep (4)
+    ///
+    /// Public build (sinks = the folder when one is set; flag false):
+    ///
+    ///   folder owed  delivered  transcribed  →
+    ///   yes          –          –            keep (1)
+    ///   no           yes        –            wholeSlot (2)
+    ///   no           no         yes          audioOnly (3)
+    ///   no           no         no           keep (4)
+    static func pruneAction(
+        meta: RecordingMeta,
+        hasTranscript: Bool,
+        sinks: [any TranscriptSink],
+        keepsOutboxTranscriptForLocalOnly: Bool
+    ) -> PruneAction {
+        if !SinkDispatcher.pendingSinks(for: meta, among: sinks).isEmpty { return .keep }
+        let delivered = meta.deliveries?.isEmpty == false || sinks.contains { $0.isDelivered(meta) }
+        if delivered, !(keepsOutboxTranscriptForLocalOnly && meta.local_only == true) { return .wholeSlot }
         let transcribed = meta.transcription != nil || hasTranscript
-        guard transcribed else { return .keep }
-        if meta.deliveries?.isEmpty == false { return .wholeSlot }
-        return .audioOnly
+        return transcribed ? .audioOnly : .keep
     }
 
     /// When a slot arrived in the outbox — its directory's creation date —
@@ -493,7 +571,7 @@ enum Outbox {
 
     /// Serialises every read-modify-write of a slot's meta.json in this
     /// process. The delivery dispatcher (retry timer), TranscriptionJob.finish
-    /// (a re-transcribe) and launch recovery each read meta, change
+    /// (a re-transcribe), --retag and launch recovery each read meta, change
     /// some fields and write it back; without one lock two of them racing
     /// would silently drop the other's change (a lost `deliveries` entry
     /// re-delivers, a lost reset leaves a stale transcript marked delivered).
@@ -580,17 +658,19 @@ enum Outbox {
 }
 
 enum AppInfo {
-    static let fallbackVersion = "0.1.2"
+    static let fallbackVersion = BuildFlavor.fallbackVersion
     static let version = version(from: Bundle.main.infoDictionary)
 
     static func version(from infoDictionary: [String: Any]?) -> String {
         infoDictionary?["CFBundleShortVersionString"] as? String ?? fallbackVersion
     }
 
-    // What captured the audio, written to meta.json and the transcript's
-    // frontmatter: a recording made on this Mac, an imported phone memo, or
-    // a file transcribed via "Transcribe Audio File…".
-    static let device = "mac"
+    static let device = BuildFlavor.device
+    // Device id for imported phone memos. Distinct from `device` so a
+    // receiving side's dedup key (device, started_at) can't collide with a
+    // Mac recording that happened to start the same second.
     static let voiceMemoDevice = "iphone-voice-memos"
+    // Device id for files transcribed via "Transcribe Audio File…", for the
+    // same reason.
     static let fileImportDevice = "file-import"
 }

@@ -66,10 +66,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // recording start and stop, each transcription job, deliveries, menu
     // toggles), so scanning the outbox from disk each time is
     // wasteful. Invalidated (→ nil) whenever the pending set changes: a new
-    // transcript is written, or a sink delivers. nil = recompute.
+    // transcript payload is written, or a sink delivers. nil = recompute.
     private var cachedPendingDeliveryCount: Int?
 
-    // Auto-retry timer for pending deliveries. 5 min cadence;
+    // Auto-retry timer for pending deliveries (mr#3). 5 min cadence;
     // SinkDispatcher + RetrySchedule decide which sinks are due based on
     // each one's persisted attempt count + last-attempt timestamp.
     private var deliveryRetryTimer: Timer?
@@ -105,8 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // the kernel drops the lock when the process exits, however it exits.
     private var instanceLockFD: Int32 = -1
 
-    /// The grant a system-audio engine needs, as System Settings › Privacy &
-    /// Security names it.
     nonisolated static func systemAudioPermissionName(for engine: SystemAudioEngineKind) -> String {
         switch engine {
         case .sck: "Screen Recording"
@@ -266,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A recording the app died in the middle of (crash, force-quit, power
     /// loss) leaves raw .caf captures and a meta.json with no ended_at. The
     /// partial CAFs are readable as-is, so finish the slot: stamp ended_at
-    /// from the capture files' modification time and transcribe + deliver
+    /// from the capture files' modification time and transcribe + upload
     /// it like any other recording. Nothing recorded is ever left to rot.
     @discardableResult
     private func recoverInterruptedRecordings(
@@ -977,8 +975,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !session.isRunning { statusItem?.button?.title = " \(pct)%" }
     }
 
-    /// `model` nil = the Default model setting (Config.defaultModel, which
-    /// falls back to the local default while cloud transcription is off).
     private func startTranscription(
         slot: OutboxSlot,
         title: String,
@@ -989,7 +985,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Transcribe → open transcript → deliver → compress. Jobs are queued
+    /// Transcribe → open transcript → upload → compress. Jobs are queued
     /// behind whatever is already transcribing (one at a time, in order)
     /// and this returns when THIS job is done, so callers that process
     /// several recordings (the Voice Memos import) can await each.
@@ -1055,7 +1051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     Task { @MainActor in self?.setTranscribeProgress(f) }
                 }
             )
-            // A fresh pending transcript now exists — refresh the badge count.
+            // A fresh pending payload now exists — refresh the badge count.
             invalidatePendingDeliveryCache()
 
             // Don't pop the previous meeting's transcript over the
@@ -1138,9 +1134,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Imports the picked memos one at a time. A memo with Apple's
-    /// transcript is complete after `prepare` (transcript written) and goes
-    /// straight to delivery; one without goes through the same
-    /// transcribe-and-deliver path as a Mac recording.
+    /// transcript is complete after `prepare` (transcript + payload
+    /// written) and goes straight to upload; one without goes through the
+    /// same transcribe-and-upload path as a Mac recording.
     private func runVoiceMemoImport(_ picked: [VoiceMemoImportWindowController.Selection]) async {
         var failures: [String] = []
         for item in picked {
@@ -1173,7 +1169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// "Transcribe Audio File…": pick one or more recordings made elsewhere
     /// (a Teams/Zoom cloud recording, a dictaphone file), confirm a title
     /// and the time the meeting actually happened, then transcribe and
-    /// deliver them exactly like a Mac recording.
+    /// upload them exactly like a Mac recording.
     @objc private func importAudioFiles() {
         guard !session.isRunning else { return }
         let panel = NSOpenPanel()
@@ -1194,7 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in await runFileImport(picked) }
     }
 
-    /// One small dialog per file: the transcript title (defaults to the file
+    /// One small dialog per file: the note title (defaults to the file
     /// name) and when the meeting happened (defaults to the file's creation
     /// time, which for a downloaded cloud recording is the download, not the
     /// meeting — hence the picker). nil = skipped.
@@ -1313,8 +1309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        // A slot past the retention window keeps only its transcript:
-        // nothing to re-run.
+        // A pruned local-only slot keeps only its transcript: nothing to re-run.
         if slot.hasAudio {
             let retranscribe = NSMenuItem(title: "Re-transcribe with…", action: nil, keyEquivalent: "")
             let modelMenu = NSMenu()
@@ -1420,12 +1415,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Drop the memoized pending count so the next read rescans. Call after
-    /// any change to the pending set (new transcript written, sink delivered).
+    /// any change to the pending set (new payload written, sink delivered).
     private func invalidatePendingDeliveryCache() {
         cachedPendingDeliveryCount = nil
     }
 
-    // MARK: Auto-retry timer
+    // MARK: Auto-retry timer (mr#3)
 
     /// Always runs: which sinks are active can change in Settings while the
     /// app is up, and a tick with nothing pending costs one outbox scan.

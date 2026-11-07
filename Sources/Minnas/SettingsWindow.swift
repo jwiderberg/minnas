@@ -589,7 +589,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
         languagesField.target = self
         languagesField.action = #selector(languagesChanged)
-        languagesField.placeholderString = "en, sv, de"
+        languagesField.placeholderString = BuildFlavor.languagesPlaceholder
         form.row("Languages:", [languagesField, NSTextField(labelWithString: "primary first")])
         form.under(SettingsUI.note("Auto-detection picks among these. Use the menubar's Language menu to pin one."))
         form.under(languagesMessage)

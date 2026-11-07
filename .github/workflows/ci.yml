@@ -26,8 +26,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Swift 6.2 or newer comes with Xcode 26. The image carries it as a
-      # non-default install; the job fails if it is not there, the same as
-      # release.yml, so a green build always means Swift 6.2.
+      # non-default install; fail if it is absent so green always means 6.2.
       - name: Select Xcode 26
         run: |
           set -euo pipefail
@@ -39,13 +38,14 @@ jobs:
           fi
           echo "Selecting $XCODE"
           sudo xcode-select -s "$XCODE"
-          xcodebuild -version | grep -E '^Xcode 26([.]|$)'
+          XCODE_VERSION="$(xcodebuild -version)"
+          printf '%s\n' "$XCODE_VERSION"
+          grep -qE '^Xcode 26([.]|$)' <<<"$XCODE_VERSION"
 
       - name: Swift version
         run: swift --version
 
-      # Package.resolved is committed, so a build gets exactly the dependency
-      # versions it names; the cache follows it.
+      # Package.resolved is committed, so builds and caches follow its pins.
       - name: Cache .build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -57,8 +57,6 @@ jobs:
       - name: Build
         run: swift build
 
-      # swift-testing suite. Xcode is selected above, so plain `swift test`
-      # finds the Testing module. Needs no models, no microphone, no TCC.
       - name: Tests (swift test)
         run: swift test
 
@@ -66,7 +64,6 @@ jobs:
       - name: Self-check (--cleanup-test)
         run: swift run minnas --cleanup-test
 
-      # Delivery backoff and pruning rules. Also no models, no TCC.
       - name: Self-check (--self-test)
         run: swift run minnas --self-test
 
@@ -83,5 +80,5 @@ jobs:
       # The installer and uninstaller print their steps and change nothing.
       - name: Script dry runs
         run: |
-          bash scripts/install.sh --dry-run --no-identity --no-launch
+          bash scripts/install.sh --dry-run
           bash scripts/uninstall.sh --dry-run </dev/null

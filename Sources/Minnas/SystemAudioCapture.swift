@@ -178,7 +178,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
         //
         // That same "audio follows content" rule is what lets us drop
         // specific apps on purpose: an audio tool that monitors the user's
-        // own mic back out (through a virtual device into the call app) would otherwise
+        // own mic back out (an audio tool → virtual device → the call) would otherwise
         // put the user's voice in the "Them" track. Excluding the app
         // excludes its audio. Only apps that are currently running can be
         // matched; a configured bundle that isn't running is simply absent.

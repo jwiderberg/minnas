@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 #
-# Build Minnas and assemble a minimal .app bundle.
+# Build minnas and assemble a minimal .app bundle.
 #
 # Why the wrapper: TCC (microphone, screen recording) attaches permissions
 # to a CFBundleIdentifier. A raw `swift run` binary has none, so the system
 # can't durably remember the user's grant — every launch would re-prompt.
 # This script builds the binary and drops it into a hand-rolled .app shell
-# with App/Info.plist, then signs it (hardened runtime, App/Minnas.entitlements)
-# with the local "Minnas Dev" identity if present, else ad-hoc.
+# with App/Info.plist, then signs it (hardened runtime,
+# App/Minnas.entitlements) with the local "Minnas Dev"
+# identity if present, else ad-hoc.
 #
 # CODESIGN_IDENTITY=<name> signs with that identity instead, and
-# CODESIGN_KEYCHAIN=<path> restricts the lookup and the signing to that
-# keychain. The release workflow (.github/workflows/release.yml) sets both to
-# the "Developer ID Application" certificate in a throwaway keychain; a
-# Developer ID signature gets a secure timestamp, which notarization requires.
-# Local identities are signed without one (no network, and a self-signed
-# certificate cannot be timestamped anyway). SKIP_BUILD=1 skips `swift build`
-# and only assembles and signs the binary already in .build (the release
-# workflow builds before the signing key is anywhere near the runner).
+# CODESIGN_KEYCHAIN=<path> restricts the lookup and signing to that keychain.
+# A "Developer ID Application" signature gets a secure timestamp, which
+# notarization requires; local identities are signed without one. SKIP_BUILD=1
+# skips every Swift invocation and assembles the existing .build/$CONFIG binary.
+# This lets release automation finish building before a signing key is in reach.
 #
 # Output: .build/Minnas.app — launch with `open .build/Minnas.app`.
 #
@@ -53,15 +51,16 @@ if [[ -n "${CODESIGN_KEYCHAIN:-}" && ! -f "$CODESIGN_KEYCHAIN" ]]; then
     exit 1
 fi
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-    if ! security find-identity -p codesigning -v ${CODESIGN_KEYCHAIN:+"$CODESIGN_KEYCHAIN"} 2>/dev/null | grep -qF "\"$CODESIGN_IDENTITY\""; then
+    if ! security find-identity -v -p codesigning ${CODESIGN_KEYCHAIN:+"$CODESIGN_KEYCHAIN"} 2>/dev/null | grep -qF "\"$CODESIGN_IDENTITY\""; then
         echo "FAIL: CODESIGN_IDENTITY '$CODESIGN_IDENTITY' is not a valid code-signing identity${CODESIGN_KEYCHAIN:+ in $CODESIGN_KEYCHAIN}." >&2
         exit 1
     fi
 fi
 
+
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
     # No swift invocation at all on this path, not even --show-bin-path:
-    # SwiftPM evaluates the manifest, and the release workflow runs this
+    # SwiftPM evaluates the manifest, and release automation may run this
     # step with the signing key in reach. .build/<config> is SwiftPM's
     # stable symlink to the per-architecture build directory.
     echo "==> SKIP_BUILD=1: using the existing $CONFIG build"
@@ -96,12 +95,9 @@ if grep -q _nemo_ <<<"$NM_OUT"; then
     exit 1
 fi
 
-# Codesign. Prefer the stable self-signed "Minnas Dev" identity
-# created by scripts/setup-signing-identity.sh — it gives the binary a
-# consistent signature hash across rebuilds, which is what TCC keys the
-# microphone, system audio and calendar grants off. Fall back to ad-hoc with
-# a warning if the identity isn't installed; that mode works but TCC will
-# revoke the grants on every rebuild.
+# Codesign. Prefer the stable self-signed identity created by
+# scripts/setup-signing-identity.sh. Its consistent signature hash keeps the
+# app's TCC grants stable across rebuilds. Fall back to ad-hoc with a warning.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
     TIMESTAMP="--timestamp=none"
     case "$CODESIGN_IDENTITY" in
@@ -115,7 +111,7 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
     else
         codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --entitlements "$ENTITLEMENTS" "$TIMESTAMP" "$APP_DIR"
     fi
-elif security find-identity -p codesigning -v 2>/dev/null | grep -qF "\"$IDENTITY_NAME\""; then
+elif security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$IDENTITY_NAME\""; then
     echo "==> codesign with '$IDENTITY_NAME'"
     codesign --force --sign "$IDENTITY_NAME" --options runtime --entitlements "$ENTITLEMENTS" --timestamp=none "$APP_DIR"
 else
