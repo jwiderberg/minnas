@@ -282,4 +282,32 @@ private struct FakeClock: CaptureClock {
         let b = clock.hostTicks()
         #expect(b >= a)
     }
+
+    /// A buffer whose nominal end runs ahead of the callback (8192 frames =
+    /// 171 ms at 48 kHz, delivered 100 ms after its start) must not make the
+    /// next contiguous buffer look like it followed a gap: continuity is
+    /// judged from the nominal end, not from the end clamped to now.
+    @Test func clampedEndDoesNotCauseResumePad() {
+        let tps = 1_000_000.0   // 1 tick = 1 µs
+        let start: UInt64 = 10_000_000
+        let frames: AVAudioFrameCount = 8192
+        let now = start + 100_000
+        let clamped = MicCapture.bufferEndTicks(start: start, hostTimeValid: true, frames: frames,
+                                                sampleRate: 48_000, ticksPerSecond: tps, now: now)
+        let nominal = MicCapture.nominalEndTicks(start: start, hostTimeValid: true, frames: frames,
+                                                 sampleRate: 48_000, ticksPerSecond: tps, previous: 0)
+        #expect(clamped == now)
+        #expect(nominal == start + 170_666)
+        // The next buffer starts exactly where this one nominally ended.
+        let nextStart = nominal
+        let fromClamped = MicCapture.resumePadSeconds(lastHostEnd: clamped, start: nextStart, hostTimeValid: true,
+                                                      now: nextStart + 200_000, ticksPerSecond: tps)
+        let fromNominal = MicCapture.resumePadSeconds(lastHostEnd: nominal, start: nextStart, hostTimeValid: true,
+                                                      now: nextStart + 200_000, ticksPerSecond: tps)
+        #expect(fromClamped > 0.05)   // the clamp alone would have padded 70 ms
+        #expect(fromNominal == 0)     // the nominal end sees contiguous audio
+        // An invalid host time keeps the previous nominal end.
+        #expect(MicCapture.nominalEndTicks(start: 0, hostTimeValid: false, frames: frames, sampleRate: 48_000,
+                                           ticksPerSecond: tps, previous: 42) == 42)
+    }
 }

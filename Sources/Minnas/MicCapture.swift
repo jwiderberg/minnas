@@ -76,6 +76,13 @@ final class TapStats: @unchecked Sendable {
     // not) ends, or the instant a restart pad covered up to. Drives the
     // stall watchdog and the silence padding on restart. 0 = none yet.
     let lastHostEndTicks = Atomic<UInt64>(0)
+    // The last buffer's NOMINAL end (start + duration, not clamped to now),
+    // for continuity decisions: whether the next buffer starts after a gap.
+    // lastHostEndTicks is clamped to now so the watchdog never sees a
+    // buffer from the future; using the clamped value for continuity would
+    // insert silence between contiguous buffers whose nominal end runs
+    // ahead of the callback. 0 = none yet.
+    let lastNominalEndTicks = Atomic<UInt64>(0)
     var restarts: Int = 0
     // Restart pads (padGapWithSilence, main actor only).
     var paddedSeconds: Double = 0
@@ -371,6 +378,18 @@ final class MicCapture: @unchecked Sendable {
     /// host time when valid, else `now`) plus its duration, never later than
     /// `now` — audio that was delivered has already been captured, and a
     /// future timestamp would hold the watchdog off.
+    /// start + duration, unclamped; `previous` when the host time is invalid
+    /// or the sum overflows (then nothing is known about where this buffer
+    /// ends, so continuity is judged from the last known end).
+    nonisolated static func nominalEndTicks(start: UInt64, hostTimeValid: Bool, frames: AVAudioFrameCount,
+                                            sampleRate: Double, ticksPerSecond: Double, previous: UInt64) -> UInt64 {
+        guard hostTimeValid, sampleRate > 0 else { return previous }
+        let duration = Double(frames) * ticksPerSecond / sampleRate
+        guard duration.isFinite, duration >= 0, duration < Double(UInt64.max / 2) else { return previous }
+        let (end, overflow) = start.addingReportingOverflow(UInt64(duration))
+        return overflow ? previous : end
+    }
+
     nonisolated static func bufferEndTicks(start: UInt64, hostTimeValid: Bool, frames: AVAudioFrameCount,
                                            sampleRate: Double, ticksPerSecond: Double, now: UInt64) -> UInt64 {
         let begin = hostTimeValid ? start : now
@@ -398,7 +417,9 @@ final class MicCapture: @unchecked Sendable {
         guard let file else { return }
         let hostNow = clock.hostTicks()
         let gap: Double
-        switch Self.padPlan(lastHostEnd: stats.lastHostEndTicks.load(ordering: .relaxed), hostNow: hostNow,
+        let nominal = stats.lastNominalEndTicks.load(ordering: .relaxed)
+        let lastEnd = nominal != 0 ? nominal : stats.lastHostEndTicks.load(ordering: .relaxed)
+        switch Self.padPlan(lastHostEnd: lastEnd, hostNow: hostNow,
                             ticksPerSecond: clock.ticksPerSecond, maxPadSeconds: Self.maxPadSeconds,
                             minimum: Self.minPadSeconds) {
         case .none:
@@ -427,6 +448,7 @@ final class MicCapture: @unchecked Sendable {
         // The padding stands in for the dead stretch up to hostNow; the stall
         // clock restarts from there.
         stats.lastHostEndTicks.store(hostNow, ordering: .relaxed)
+        stats.lastNominalEndTicks.store(hostNow, ordering: .relaxed)
         micLog.notice("padded mic track with \(String(format: "%.1f", gap), privacy: .public) s of silence across the restart")
     }
 
@@ -589,29 +611,32 @@ final class MicCapture: @unchecked Sendable {
                     stats.frameCount &+= UInt64(buffer.frameLength)
                 }
                 let hostNow = clock.hostTicks()
-                let previousEnd = stats.lastHostEndTicks.load(ordering: .relaxed)
+                let previousNominal = stats.lastNominalEndTicks.load(ordering: .relaxed)
                 stats.lastHostEndTicks.store(
                     Self.bufferEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
                                         frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
                                         ticksPerSecond: clock.ticksPerSecond, now: hostNow),
                     ordering: .relaxed)
+                stats.lastNominalEndTicks.store(
+                    Self.nominalEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
+                                         frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
+                                         ticksPerSecond: clock.ticksPerSecond, previous: previousNominal),
+                    ordering: .relaxed)
                 // Buffers resumed after a gap with no restart in between (a
                 // restart pads up to its own instant and advances
                 // lastHostEndTicks): fill the gap before this buffer.
                 if let zeros {
-                    let gap = Self.resumePadSeconds(lastHostEnd: previousEnd, start: when.hostTime,
+                    let gap = Self.resumePadSeconds(lastHostEnd: previousNominal, start: when.hostTime,
                                                     hostTimeValid: when.isHostTimeValid, now: hostNow,
                                                     ticksPerSecond: clock.ticksPerSecond)
                     if gap > 0 {
                         let rate = fileFormat.sampleRate
                         let padded = Self.writeSilence(into: audioFile, zero: zeros, seconds: gap, rate: rate)
                         if padded.frames > 0 { stats.addResumePad(Double(padded.frames) / rate) }
-                        if let error = padded.error {
-                            stats.writeErrors &+= 1
-                            if stats.firstWriteError == nil {
-                                stats.firstWriteError = "\(error)"
-                            }
-                        }
+                        // Counted only: formatting the error would allocate
+                        // on the render thread. The buffer write that follows
+                        // fails the same way and records the text.
+                        if padded.error != nil { stats.writeErrors &+= 1 }
                     }
                 }
                 do {
