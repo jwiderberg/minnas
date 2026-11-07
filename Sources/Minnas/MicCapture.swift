@@ -378,16 +378,18 @@ final class MicCapture: @unchecked Sendable {
     /// host time when valid, else `now`) plus its duration, never later than
     /// `now` — audio that was delivered has already been captured, and a
     /// future timestamp would hold the watchdog off.
-    /// start + duration, unclamped; `previous` when the host time is invalid
-    /// or the sum overflows (then nothing is known about where this buffer
-    /// ends, so continuity is judged from the last known end).
+    /// start + duration, unclamped. When the host time is invalid or the sum
+    /// overflows, the buffer's end is unknown and `fallback` (the clamped end,
+    /// i.e. now) is used: the audio has been appended, so the nominal end must
+    /// move past it, or the next gap would be measured from before it and
+    /// padded over it.
     nonisolated static func nominalEndTicks(start: UInt64, hostTimeValid: Bool, frames: AVAudioFrameCount,
-                                            sampleRate: Double, ticksPerSecond: Double, previous: UInt64) -> UInt64 {
-        guard hostTimeValid, sampleRate > 0 else { return previous }
+                                            sampleRate: Double, ticksPerSecond: Double, fallback: UInt64) -> UInt64 {
+        guard hostTimeValid, sampleRate > 0 else { return fallback }
         let duration = Double(frames) * ticksPerSecond / sampleRate
-        guard duration.isFinite, duration >= 0, duration < Double(UInt64.max / 2) else { return previous }
+        guard duration.isFinite, duration >= 0, duration < Double(UInt64.max / 2) else { return fallback }
         let (end, overflow) = start.addingReportingOverflow(UInt64(duration))
-        return overflow ? previous : end
+        return overflow ? fallback : end
     }
 
     nonisolated static func bufferEndTicks(start: UInt64, hostTimeValid: Bool, frames: AVAudioFrameCount,
@@ -612,15 +614,14 @@ final class MicCapture: @unchecked Sendable {
                 }
                 let hostNow = clock.hostTicks()
                 let previousNominal = stats.lastNominalEndTicks.load(ordering: .relaxed)
-                stats.lastHostEndTicks.store(
-                    Self.bufferEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
-                                        frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
-                                        ticksPerSecond: clock.ticksPerSecond, now: hostNow),
-                    ordering: .relaxed)
+                let clampedEnd = Self.bufferEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
+                                                     frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
+                                                     ticksPerSecond: clock.ticksPerSecond, now: hostNow)
+                stats.lastHostEndTicks.store(clampedEnd, ordering: .relaxed)
                 stats.lastNominalEndTicks.store(
                     Self.nominalEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
                                          frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
-                                         ticksPerSecond: clock.ticksPerSecond, previous: previousNominal),
+                                         ticksPerSecond: clock.ticksPerSecond, fallback: clampedEnd),
                     ordering: .relaxed)
                 // Buffers resumed after a gap with no restart in between (a
                 // restart pads up to its own instant and advances

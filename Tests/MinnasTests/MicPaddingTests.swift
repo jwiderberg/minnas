@@ -295,7 +295,7 @@ private struct FakeClock: CaptureClock {
         let clamped = MicCapture.bufferEndTicks(start: start, hostTimeValid: true, frames: frames,
                                                 sampleRate: 48_000, ticksPerSecond: tps, now: now)
         let nominal = MicCapture.nominalEndTicks(start: start, hostTimeValid: true, frames: frames,
-                                                 sampleRate: 48_000, ticksPerSecond: tps, previous: 0)
+                                                 sampleRate: 48_000, ticksPerSecond: tps, fallback: 0)
         #expect(clamped == now)
         #expect(nominal == start + 170_666)
         // The next buffer starts exactly where this one nominally ended.
@@ -306,8 +306,10 @@ private struct FakeClock: CaptureClock {
                                                       now: nextStart + 200_000, ticksPerSecond: tps)
         #expect(fromClamped > 0.05)   // the clamp alone would have padded 70 ms
         #expect(fromNominal == 0)     // the nominal end sees contiguous audio
-        // An invalid host time keeps the previous nominal end.
+        // An invalid host time moves the nominal end to the clamped end (the
+        // audio was appended), never leaves it behind where a later gap would
+        // be measured from before audio already in the file.
         #expect(MicCapture.nominalEndTicks(start: 0, hostTimeValid: false, frames: frames, sampleRate: 48_000,
-                                           ticksPerSecond: tps, previous: 42) == 42)
+                                           ticksPerSecond: tps, fallback: now) == now)
     }
 }
