@@ -8,7 +8,18 @@ import os.log
 /// PaddedCAFWriter against a real CAF in a temp directory, driven on a test
 /// queue the way the engines drive it on their write queues, and read back
 /// with AVAudioFile.
-@Suite struct PaddedCAFWriterTests {
+// Serialized: each test blocks a cooperative thread in `queue.sync` (and
+// finishBlocking waits on a semaphore) while AVFoundation finishes the file
+// on its own queue. Run in parallel on a two-core CI runner, the suite
+// starved itself until the 10 s finish deadline fired (2026-11-07). The
+// finish calls use a generous timeout for the same reason: the tests prove
+// the writer finishes, not the production deadline, which
+// constantsAreUnchanged pins.
+@Suite(.serialized) struct PaddedCAFWriterTests {
+    /// Long enough for a cold hosted runner; the production value is
+    /// PaddedCAFWriter.finishTimeout.
+    static let testFinishTimeout: Double = 60
+
     private static let rate: Double = 48000
     private let log = Logger(subsystem: "com.jwiderberg.minnas", category: "PaddedCAFWriterTests")
 
@@ -105,7 +116,7 @@ import os.log
             let fill = f.writer.fillGap(upTo: Self.seconds(3), format: Self.tapFormat, minimum: 0.05)
             let second = Self.appendTone(f.writer, seconds: 1)
             let end = f.writer.timelineEnd
-            return (first, fill, second, end, f.writer.finishBlocking(timeout: PaddedCAFWriter.finishTimeout))
+            return (first, fill, second, end, f.writer.finishBlocking(timeout: Self.testFinishTimeout))
         }
         #expect(Self.isAppended(first))
         #expect(Self.isAppended(second))
@@ -146,7 +157,7 @@ import os.log
             let overSeconds = f.writer.fillGap(seconds: 301, format: Self.tapFormat)
             let nanSeconds = f.writer.fillGap(seconds: .nan, format: Self.tapFormat)
             let end = f.writer.timelineEnd
-            _ = f.writer.finishBlocking(timeout: PaddedCAFWriter.finishTimeout)
+            _ = f.writer.finishBlocking(timeout: Self.testFinishTimeout)
             return (over, nan, small, overSeconds, nanSeconds, end)
         }
         if case .rejected(let gap) = results.0 { #expect(abs(gap - 301) < 1e-9) } else { Issue.record("301 s: \(results.0)") }
@@ -173,7 +184,7 @@ import os.log
             }
             let appended = buffer.map { f.writer.append($0, readyWait: 0) }
             let end = f.writer.timelineEnd
-            _ = f.writer.finishBlocking(timeout: PaddedCAFWriter.finishTimeout)
+            _ = f.writer.finishBlocking(timeout: Self.testFinishTimeout)
             return (before, appended, end)
         }
         if case .noTimeline = before {} else { Issue.record("expected .noTimeline, got \(before)") }
@@ -231,7 +242,7 @@ import os.log
             f.writer.startSession(atSourceTime: .zero, seedTimeline: true)
             _ = Self.appendTone(f.writer, seconds: 0.5)
         }
-        let finished = await f.writer.finish(timeout: PaddedCAFWriter.finishTimeout)
+        let finished = await f.writer.finish(timeout: Self.testFinishTimeout)
         #expect(finished)
         #expect(!f.stats.hasTimedOut)
         #expect(f.queue.sync { f.writer.isOpen } == false)
