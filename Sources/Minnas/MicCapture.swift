@@ -40,6 +40,11 @@
 // lastBufferAt is derived from the same host ticks, so a sleep never looks
 // like a stall. Any single pad is capped at 5 min (padPlan). The clocks
 // are injectable (CaptureClock) so a test can simulate a sleep.
+// A stall can also end without a restart: the engine starts delivering
+// again on its own. The tap then sees a buffer whose start host time is
+// past the end of the last one and writes zeros for the gap before the
+// buffer (same padPlan, same bounds), from a zero buffer preallocated
+// when the tap is built, so the render thread does not allocate for it.
 //
 
 import AppKit
@@ -72,7 +77,37 @@ final class TapStats: @unchecked Sendable {
     // stall watchdog and the silence padding on restart. 0 = none yet.
     let lastHostEndTicks = Atomic<UInt64>(0)
     var restarts: Int = 0
+    // Restart pads (padGapWithSilence, main actor only).
     var paddedSeconds: Double = 0
+    // Resume pads written by the tap (see tapBlock), as Double bit patterns
+    // so the tap thread and the main actor share them atomically: the total
+    // for the stop line / capture_health, and the amount not yet logged,
+    // which checkHealth drains into one notice. 0 = 0.0 s.
+    let resumePaddedBits = Atomic<UInt64>(0)
+    let resumePadPendingBits = Atomic<UInt64>(0)
+
+    /// Tap thread: account for `seconds` of resume padding. Lock-free.
+    func addResumePad(_ seconds: Double) {
+        Self.add(seconds, to: resumePaddedBits)
+        Self.add(seconds, to: resumePadPendingBits)
+    }
+
+    /// Main actor: resume padding written since the last call, in seconds.
+    func takePendingResumePad() -> Double {
+        Double(bitPattern: resumePadPendingBits.exchange(0, ordering: .relaxed))
+    }
+
+    var resumePaddedSeconds: Double { Double(bitPattern: resumePaddedBits.load(ordering: .relaxed)) }
+
+    private static func add(_ seconds: Double, to bits: borrowing Atomic<UInt64>) {
+        var current = bits.load(ordering: .relaxed)
+        while true {
+            let next = (Double(bitPattern: current) + seconds).bitPattern
+            let (exchanged, original) = bits.compareExchange(expected: current, desired: next, ordering: .relaxed)
+            if exchanged { return }
+            current = original
+        }
+    }
 }
 
 final class MicCapture: @unchecked Sendable {
@@ -137,7 +172,7 @@ final class MicCapture: @unchecked Sendable {
     /// How many times the engine was re-attached after a route change or
     /// stall during this recording.
     var restartCount: Int { stats.restarts }
-    var paddedSecondsTotal: Double { stats.paddedSeconds }
+    var paddedSecondsTotal: Double { stats.paddedSeconds + stats.resumePaddedSeconds }
     var writeErrorCount: UInt64 { stats.writeErrors }
     /// Seconds of audio the tap actually delivered (excluding padding).
     var secondsCaptured: Double {
@@ -186,6 +221,7 @@ final class MicCapture: @unchecked Sendable {
     /// or has delivered nothing for a few seconds, re-attach.
     @MainActor
     func checkHealth() {
+        logResumePad()
         guard running, restartTask == nil else { return }
         if !engine.isRunning {
             scheduleRestart(reason: "engine not running")
@@ -196,6 +232,14 @@ final class MicCapture: @unchecked Sendable {
         if let threshold = backoff.overdue(lastBufferAt: lastBufferAt, now: clock.wall()) {
             scheduleRestart(reason: "no buffers for \(Int(threshold)) s")
         }
+    }
+
+    /// Logs the resume padding the tap wrote since the last call, if any.
+    @MainActor
+    private func logResumePad() {
+        let seconds = stats.takePendingResumePad()
+        guard seconds > 0 else { return }
+        micLog.notice("padded mic track with \(String(format: "%.1f", seconds), privacy: .public) s of silence after buffers resumed")
     }
 
     @MainActor
@@ -270,6 +314,57 @@ final class MicCapture: @unchecked Sendable {
         guard gap.isFinite, gap > minimum else { return .none }
         if gap > maxPadSeconds { return .capped(seconds: maxPadSeconds, gap: gap) }
         return .pad(seconds: gap)
+    }
+
+    /// Seconds of silence the tap writes before a buffer that starts at
+    /// host time `start`, when the last buffer (or restart pad) ended at
+    /// `lastHostEnd`: padPlan over that gap (padded or capped amount; 0 for
+    /// none). Only with a valid host time: without one the start is
+    /// unknown, and using the delivery time would pad every buffer by its
+    /// own duration. A start in the future is taken as `now`.
+    nonisolated static func resumePadSeconds(lastHostEnd: UInt64, start: UInt64, hostTimeValid: Bool,
+                                             now: UInt64, ticksPerSecond: Double) -> Double {
+        guard hostTimeValid else { return 0 }
+        switch padPlan(lastHostEnd: lastHostEnd, hostNow: min(start, now), ticksPerSecond: ticksPerSecond,
+                       maxPadSeconds: maxPadSeconds, minimum: minPadSeconds) {
+        case .none: return 0
+        case .pad(let seconds): return seconds
+        case .capped(let seconds, _): return seconds
+        }
+    }
+
+    /// Appends `seconds` of silence at `rate` to `file`, in chunks of at
+    /// most `zero.frameCapacity` frames from `zero` (a zero-filled buffer in
+    /// the file's processing format). Allocates nothing. Returns the frames
+    /// written and the first write error, which ends the pad.
+    nonisolated static func writeSilence(into file: AVAudioFile, zero: AVAudioPCMBuffer, seconds: Double,
+                                         rate: Double) -> (frames: Int, error: (any Error)?) {
+        let capacity = Int(zero.frameCapacity)
+        guard seconds.isFinite, seconds > 0, rate.isFinite, rate > 0, capacity > 0,
+              seconds <= maxPadSeconds else { return (0, nil) }
+        var remaining = Int(seconds * rate)
+        var written = 0
+        while remaining > 0 {
+            let n = min(remaining, capacity)
+            zero.frameLength = AVAudioFrameCount(n)
+            do { try file.write(from: zero) } catch { return (written, error) }
+            written += n
+            remaining -= n
+        }
+        return (written, nil)
+    }
+
+    /// One second of zeros in `format`, for the tap's resume pad. Built on
+    /// the main actor when the tap is; nil if it cannot be allocated (the
+    /// tap then skips resume pads).
+    static func makeZeroBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let frames = AVAudioFrameCount(format.sampleRate)
+        guard frames > 0, let zeros = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
+        zeros.frameLength = frames
+        for buffer in UnsafeMutableAudioBufferListPointer(zeros.mutableAudioBufferList) {
+            if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) }
+        }
+        return zeros
     }
 
     /// Host time at which a buffer's audio ends: its start (the AVAudioTime's
@@ -444,11 +539,13 @@ final class MicCapture: @unchecked Sendable {
         // method inherits main-actor isolation, and Swift's runtime check
         // then traps the first time the audio thread calls it (SIGTRAP in
         // dispatch_assert_queue — reproduced with the --mic-test harness).
+        // Preallocated here so the tap's resume pad never allocates.
+        let zeros = Self.makeZeroBuffer(format: fileFormat)
         input.installTap(onBus: 0, bufferSize: 4096, format: format,
                          block: Self.tapBlock(stats: stats, clock: clock, audioFile: audioFile,
                                               needsMonoCopy: needsMonoCopy,
                                               monoInputFormat: monoInputFormat, converter: converter,
-                                              fileFormat: fileFormat))
+                                              fileFormat: fileFormat, zeros: zeros))
 
         do {
             try engine.start()
@@ -461,11 +558,14 @@ final class MicCapture: @unchecked Sendable {
 
     /// The per-buffer tap. nonisolated so the closure carries no actor
     /// isolation (see the call site). Writes to `audioFile` only from the
-    /// audio thread while installed.
+    /// audio thread while installed. Before a buffer that starts more than
+    /// 0.05 s of host time after the last one ended (buffers resumed after a
+    /// stall without a restart), writes that gap as zeros from `zeros`.
     private nonisolated static func tapBlock(stats: TapStats, clock: any CaptureClock, audioFile: AVAudioFile,
                                              needsMonoCopy: Bool,
                                              monoInputFormat: AVAudioFormat, converter: AVAudioConverter?,
-                                             fileFormat: AVAudioFormat) -> AVAudioNodeTapBlock {
+                                             fileFormat: AVAudioFormat,
+                                             zeros: AVAudioPCMBuffer?) -> AVAudioNodeTapBlock {
         return { buffer, when in
                 // Sample-content check so we can tell silent-buffer vs no-buffer
                 // cases apart in the post-recording log. Cheap: peek one
@@ -488,11 +588,32 @@ final class MicCapture: @unchecked Sendable {
                 } else {
                     stats.frameCount &+= UInt64(buffer.frameLength)
                 }
+                let hostNow = clock.hostTicks()
+                let previousEnd = stats.lastHostEndTicks.load(ordering: .relaxed)
                 stats.lastHostEndTicks.store(
                     Self.bufferEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
                                         frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
-                                        ticksPerSecond: clock.ticksPerSecond, now: clock.hostTicks()),
+                                        ticksPerSecond: clock.ticksPerSecond, now: hostNow),
                     ordering: .relaxed)
+                // Buffers resumed after a gap with no restart in between (a
+                // restart pads up to its own instant and advances
+                // lastHostEndTicks): fill the gap before this buffer.
+                if let zeros {
+                    let gap = Self.resumePadSeconds(lastHostEnd: previousEnd, start: when.hostTime,
+                                                    hostTimeValid: when.isHostTimeValid, now: hostNow,
+                                                    ticksPerSecond: clock.ticksPerSecond)
+                    if gap > 0 {
+                        let rate = fileFormat.sampleRate
+                        let padded = Self.writeSilence(into: audioFile, zero: zeros, seconds: gap, rate: rate)
+                        if padded.frames > 0 { stats.addResumePad(Double(padded.frames) / rate) }
+                        if let error = padded.error {
+                            stats.writeErrors &+= 1
+                            if stats.firstWriteError == nil {
+                                stats.firstWriteError = "\(error)"
+                            }
+                        }
+                    }
+                }
                 do {
                     var toWrite = buffer
                     if needsMonoCopy {
@@ -532,7 +653,8 @@ final class MicCapture: @unchecked Sendable {
         restartTask = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        micLog.notice("stop: frames=\(self.stats.frameCount, privacy: .public) nonSilentFrames=\(self.stats.nonSilentFrames, privacy: .public) peak=\(self.stats.peakAmplitude, privacy: .public) writeErrors=\(self.stats.writeErrors, privacy: .public) firstWriteError=\(self.stats.firstWriteError ?? "nil", privacy: .public) restarts=\(self.stats.restarts, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.stats.paddedSeconds), privacy: .public)")
+        logResumePad()
+        micLog.notice("stop: frames=\(self.stats.frameCount, privacy: .public) nonSilentFrames=\(self.stats.nonSilentFrames, privacy: .public) peak=\(self.stats.peakAmplitude, privacy: .public) writeErrors=\(self.stats.writeErrors, privacy: .public) firstWriteError=\(self.stats.firstWriteError ?? "nil", privacy: .public) restarts=\(self.stats.restarts, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public)")
         // AVAudioFile flushes/closes on deinit.
         file = nil
     }

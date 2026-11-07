@@ -150,6 +150,131 @@ private struct FakeClock: CaptureClock {
         #expect(backoff.overdue(lastBufferAt: lastBufferAt(), now: clock.wall()) == 3)
     }
 
+    // MARK: resume pad (buffers come back without a restart)
+
+    /// The sleep run of 2026-11-07: buffers end at host t, the engine is dead
+    /// for 5 s of host time, the Mac sleeps 120 s (host time frozen), and
+    /// buffers resume 1.3 s of host time after the wake. The gap before the
+    /// first resumed buffer is the 6.3 awake seconds, not 126.3.
+    @Test func resumeAfterSleepPadsOnlyAwakeTime() {
+        var clock = FakeClock(host: base, now: Date(timeIntervalSince1970: 1_800_000_000), ticksPerSecond: tps)
+        let lastEnd = MicCapture.bufferEndTicks(start: clock.hostTicks() - 2_400_000, hostTimeValid: true,
+                                                frames: 4800, sampleRate: 48_000, ticksPerSecond: tps,
+                                                now: clock.hostTicks())
+        #expect(lastEnd == base)
+        clock.advance(host: 5, wall: 5)       // dead, awake
+        clock.advance(host: 0, wall: 120)     // asleep
+        clock.advance(host: 1.3, wall: 1.3)   // awake again, still dead
+        let resumedStart = clock.hostTicks()
+        clock.advance(host: 0.1, wall: 0.1)   // the buffer is delivered once captured
+        let plan = MicCapture.padPlan(lastHostEnd: lastEnd, hostNow: resumedStart, ticksPerSecond: tps,
+                                      maxPadSeconds: MicCapture.maxPadSeconds, minimum: MicCapture.minPadSeconds)
+        guard case .pad(let seconds) = plan else {
+            Issue.record("expected a pad, got \(plan)")
+            return
+        }
+        #expect(abs(seconds - 6.3) < 1e-6)
+        let resume = MicCapture.resumePadSeconds(lastHostEnd: lastEnd, start: resumedStart, hostTimeValid: true,
+                                                 now: clock.hostTicks(), ticksPerSecond: tps)
+        #expect(abs(resume - 6.3) < 1e-6)
+    }
+
+    @Test func contiguousBuffersAreNotResumePadded() {
+        // 4800 frames at 48 kHz back to back: each starts where the last ended.
+        let end = MicCapture.bufferEndTicks(start: base, hostTimeValid: true, frames: 4800, sampleRate: 48_000,
+                                            ticksPerSecond: tps, now: base + 10_000_000)
+        #expect(MicCapture.resumePadSeconds(lastHostEnd: end, start: end, hostTimeValid: true,
+                                            now: end + 2_400_000, ticksPerSecond: tps) == 0)
+        // Within the 0.05 s minimum: nothing.
+        #expect(MicCapture.resumePadSeconds(lastHostEnd: end, start: end + UInt64(0.04 * tps), hostTimeValid: true,
+                                            now: end + UInt64(0.2 * tps), ticksPerSecond: tps) == 0)
+    }
+
+    @Test func resumePadNeedsAValidHostTimeAndIsCapped() {
+        // No host time: the start is unknown, so no pad (delivery time would
+        // pad every buffer by its own length).
+        #expect(MicCapture.resumePadSeconds(lastHostEnd: base, start: 0, hostTimeValid: false,
+                                            now: base + UInt64(0.1 * tps), ticksPerSecond: tps) == 0)
+        // No buffer yet.
+        #expect(MicCapture.resumePadSeconds(lastHostEnd: 0, start: base, hostTimeValid: true,
+                                            now: base, ticksPerSecond: tps) == 0)
+        // A start in the future counts as now.
+        #expect(MicCapture.resumePadSeconds(lastHostEnd: base, start: base + UInt64(50 * tps), hostTimeValid: true,
+                                            now: base + UInt64(2 * tps), ticksPerSecond: tps) == 2)
+        // Over the cap: the capped amount.
+        #expect(MicCapture.resumePadSeconds(lastHostEnd: base, start: base + UInt64(400 * tps), hostTimeValid: true,
+                                            now: base + UInt64(401 * tps), ticksPerSecond: tps) == 300)
+    }
+
+    /// A restart pads up to its own instant and stores it as the last end;
+    /// the first buffer of the restarted engine is then padded only for the
+    /// time after that instant (engine start-up), never again for the gap
+    /// the restart already covered.
+    @Test func restartPadAndResumePadDoNotOverlap() {
+        let lastEnd = base
+        let restartAt = base + UInt64(4 * tps)
+        guard case .pad(let restartPad) = MicCapture.padPlan(lastHostEnd: lastEnd, hostNow: restartAt,
+                                                             ticksPerSecond: tps,
+                                                             maxPadSeconds: MicCapture.maxPadSeconds,
+                                                             minimum: MicCapture.minPadSeconds) else {
+            Issue.record("expected a restart pad")
+            return
+        }
+        // The restart stores restartAt; the engine's first buffer starts 0.3 s later.
+        let firstStart = restartAt + UInt64(0.3 * tps)
+        let resume = MicCapture.resumePadSeconds(lastHostEnd: restartAt, start: firstStart, hostTimeValid: true,
+                                                 now: firstStart + 2_400_000, ticksPerSecond: tps)
+        #expect(abs(restartPad - 4) < 1e-6)
+        #expect(abs(resume - 0.3) < 1e-6)
+        #expect(abs(restartPad + resume - 4.3) < 1e-6)   // the whole gap, once
+    }
+
+    @Test func writeSilenceAppendsZerosInOneSecondChunks() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mic-silence-\(UUID().uuidString).caf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+        ]
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: settings)
+            let format = file.processingFormat
+            let zeros = try #require(MicCapture.makeZeroBuffer(format: format))
+            #expect(zeros.frameCapacity == 48_000)
+            let result = MicCapture.writeSilence(into: file, zero: zeros, seconds: 2.5, rate: format.sampleRate)
+            #expect(result.frames == 120_000)
+            #expect(result.error == nil)
+            // Degenerate requests write nothing.
+            #expect(MicCapture.writeSilence(into: file, zero: zeros, seconds: .nan, rate: 48_000).frames == 0)
+            #expect(MicCapture.writeSilence(into: file, zero: zeros, seconds: 1, rate: 0).frames == 0)
+            #expect(MicCapture.writeSilence(into: file, zero: zeros, seconds: 301, rate: 48_000).frames == 0)
+        }
+        let read = try AVAudioFile(forReading: url)
+        #expect(read.length == 120_000)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: read.processingFormat, frameCapacity: 120_000))
+        try read.read(into: buffer)
+        #expect(buffer.frameLength == 120_000)
+        let samples = try #require(buffer.floatChannelData?[0])
+        var peak: Float = 0
+        for i in 0..<Int(buffer.frameLength) { peak = max(peak, abs(samples[i])) }
+        #expect(peak == 0)
+    }
+
+    @Test func resumePadAccountingIsDrainedOnce() {
+        let stats = TapStats()
+        stats.addResumePad(1.5)
+        stats.addResumePad(0.25)
+        #expect(stats.resumePaddedSeconds == 1.75)
+        #expect(stats.takePendingResumePad() == 1.75)
+        #expect(stats.takePendingResumePad() == 0)
+        #expect(stats.resumePaddedSeconds == 1.75)
+    }
+
     @Test func machClockUsesTheHostTimebase() {
         let clock = MachClock()
         #expect(clock.ticksPerSecond == HostClock.ticksPerSecond)
