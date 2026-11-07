@@ -30,14 +30,16 @@
 // tap while a tap is installed, and from the restart path only after the
 // tap is removed — so writes never interleave.
 //
-// Sleep: the padding is wall-clock based, but a sleep is not a dead mic —
-// the system track's host-time PTS doesn't advance in sleep either, so
-// padding it would push the mic track ahead and write minutes-to-hours of
-// zeros on wake. Across a sleep the stall clock restarts at wake and the
-// sleep itself is never padded. If the engine died over the sleep, the
-// two tracks may then be offset by up to the sleep length; that's logged
-// with its cause and is a far smaller harm than gigabytes of silence.
-// Any single pad is also capped at 5 min (clock jumps, a missed wake).
+// Host time: the tap records the host time (mach_absolute_time) at which
+// each buffer's audio ends, and the restart pad covers host time from
+// there to now, like the system engines' gap fill. Host time does not
+// advance while the Mac sleeps, so a sleep is never padded, and the dead
+// stretch the Mac was awake for (before the sleep and after the wake) is,
+// which keeps the mic track aligned with the system track (whose PTS is
+// host time too) when the engine dies across a sleep. The watchdog's
+// lastBufferAt is derived from the same host ticks, so a sleep never looks
+// like a stall. Any single pad is capped at 5 min (padPlan). The clocks
+// are injectable (CaptureClock) so a test can simulate a sleep.
 //
 
 import AppKit
@@ -65,9 +67,10 @@ final class TapStats: @unchecked Sendable {
     // MainActor read are a single atomic 64-bit access — an Optional<Date>
     // is 16 bytes and would tear. 0 = no signal yet.
     let lastSignalBits = Atomic<UInt64>(0)
-    // Wall-clock of the last buffer of ANY kind (silent or not). Drives the
+    // Host time (mach ticks) at which the last buffer of ANY kind (silent or
+    // not) ends, or the instant a restart pad covered up to. Drives the
     // stall watchdog and the silence padding on restart. 0 = none yet.
-    let lastBufferBits = Atomic<UInt64>(0)
+    let lastHostEndTicks = Atomic<UInt64>(0)
     var restarts: Int = 0
     var paddedSeconds: Double = 0
 }
@@ -84,22 +87,24 @@ final class MicCapture: @unchecked Sendable {
     // a buffer; backs the stall threshold off so a dead device doesn't spin
     // the restart loop) and stalledSince. Main actor only.
     private var backoff = RestartBackoff()
+    // will-sleep/did-wake observers; they only log, for post-mortems.
     private var sleepObservers: [NSObjectProtocol] = []
-    // Set between willSleep and didWake. A restart that runs in that window
-    // (the engine's config-change can land before didWake) must not pad.
-    private var sleepingSince: Date?
+    private let clock: any CaptureClock
 
     /// Upper bound on one silence pad. A real route-change restart is back
     /// in well under a second; anything past this is a clock jump or a
-    /// sleep we didn't see, and padding it could fill the disk.
+    /// stuck timestamp, and padding it could fill the disk.
     static let maxPadSeconds: Double = 300
+    /// Gaps at or below this are not padded.
+    static let minPadSeconds: Double = 0.05
 
     /// When the mic stopped delivering audio and a restart is in progress
     /// or has failed; nil while healthy. The menubar shows a warning off it.
     var stalledSince: Date? { backoff.stalledSince }
 
-    init(outputURL: URL) {
+    init(outputURL: URL, clock: any CaptureClock = MachClock()) {
         self.outputURL = outputURL
+        self.clock = clock
     }
 
     /// Live peak amplitude since the last call. Reset after read so the
@@ -119,8 +124,15 @@ final class MicCapture: @unchecked Sendable {
     /// Wall-clock of the most recent non-silent buffer (auto-stop).
     var lastSignalAt: Date? { Date(epochBits: stats.lastSignalBits.load(ordering: .relaxed)) }
 
-    /// Wall-clock of the most recent buffer of any kind.
-    var lastBufferAt: Date? { Date(epochBits: stats.lastBufferBits.load(ordering: .relaxed)) }
+    /// Wall-clock of the most recent buffer of any kind, derived from host
+    /// ticks (now minus the host time since the buffer ended), so time the
+    /// Mac spent asleep is not counted.
+    var lastBufferAt: Date? {
+        let ticks = stats.lastHostEndTicks.load(ordering: .relaxed)
+        guard ticks != 0 else { return nil }
+        return Self.wallTime(ofHostTicks: ticks, hostNow: clock.hostTicks(), wallNow: clock.wall(),
+                             ticksPerSecond: clock.ticksPerSecond)
+    }
 
     /// How many times the engine was re-attached after a route change or
     /// stall during this recording.
@@ -156,35 +168,17 @@ final class MicCapture: @unchecked Sendable {
             }
         }
 
-        // queue: .main so the handlers run synchronously on the main thread,
-        // ahead of any restart Task queued behind them.
+        // Log lines only, for post-mortems: host time does not advance in a
+        // sleep, so neither the pad nor the watchdog needs to know about it.
         let ws = NSWorkspace.shared.notificationCenter
         sleepObservers = [
-            ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.systemWillSleep() }
+            ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+                micLog.notice("system will sleep")
             },
-            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.systemDidWake() }
+            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+                micLog.notice("system did wake")
             },
         ]
-    }
-
-    @MainActor
-    private func systemWillSleep() {
-        guard running else { return }
-        sleepingSince = Date()
-        micLog.notice("system going to sleep while recording; the sleep will not be padded")
-    }
-
-    /// Restart the stall clock at wake, before any restart can pad, so the
-    /// sleep never turns into silence in the file (see the header).
-    @MainActor
-    private func systemDidWake() {
-        guard running else { return }
-        let slept = sleepingSince.map { Date().timeIntervalSince($0) }
-        sleepingSince = nil
-        stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
-        micLog.notice("system woke after \(slept.map { String(format: "%.0f", $0) } ?? "unknown", privacy: .public) s asleep; mic stall clock reset, sleep not padded (mic/system tracks may be offset by up to that if the engine died over the sleep)")
     }
 
     /// Belt-and-braces for route changes the notification doesn't cover:
@@ -199,7 +193,7 @@ final class MicCapture: @unchecked Sendable {
         }
         // 3 s normally; doubles for each restart that never produced a
         // buffer, up to a minute, so a dead device is retried, not spun on.
-        if let threshold = backoff.overdue(lastBufferAt: lastBufferAt) {
+        if let threshold = backoff.overdue(lastBufferAt: lastBufferAt, now: clock.wall()) {
             scheduleRestart(reason: "no buffers for \(Int(threshold)) s")
         }
     }
@@ -207,7 +201,7 @@ final class MicCapture: @unchecked Sendable {
     @MainActor
     private func scheduleRestart(reason: String) {
         guard running, restartTask == nil else { return }
-        backoff.noteRestartScheduled(restartsSoFar: stats.restarts, lastBufferAt: lastBufferAt)
+        backoff.noteRestartScheduled(restartsSoFar: stats.restarts, lastBufferAt: lastBufferAt, now: clock.wall())
         micLog.error("mic stalled (\(reason, privacy: .public)); restarting")
         restartTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -254,24 +248,70 @@ final class MicCapture: @unchecked Sendable {
         stats.restarts += 1
     }
 
-    /// Writes zeros covering the wall-clock gap since the last buffer, so a
-    /// mic segment captured after a restart lands at the right offset
+    /// What padGapWithSilence writes for a host-time gap.
+    enum PadPlan: Equatable, Sendable {
+        /// No gap worth padding (or no usable timestamps).
+        case none
+        /// Pad the whole gap.
+        case pad(seconds: Double)
+        /// The gap is over the cap; pad only `seconds` of it.
+        case capped(seconds: Double, gap: Double)
+    }
+
+    /// The gap from the end of the last buffer to `hostNow`, in host time,
+    /// and how much of it to pad: nothing at or below `minimum`, at most
+    /// `maxPadSeconds`. A zero `lastHostEnd` (no buffer yet), a `hostNow`
+    /// that is not after it, or a non-finite result plans nothing.
+    static func padPlan(lastHostEnd: UInt64, hostNow: UInt64, ticksPerSecond: Double,
+                        maxPadSeconds: Double, minimum: Double) -> PadPlan {
+        guard lastHostEnd != 0, hostNow > lastHostEnd,
+              ticksPerSecond.isFinite, ticksPerSecond > 0 else { return .none }
+        let gap = Double(hostNow - lastHostEnd) / ticksPerSecond
+        guard gap.isFinite, gap > minimum else { return .none }
+        if gap > maxPadSeconds { return .capped(seconds: maxPadSeconds, gap: gap) }
+        return .pad(seconds: gap)
+    }
+
+    /// Host time at which a buffer's audio ends: its start (the AVAudioTime's
+    /// host time when valid, else `now`) plus its duration, never later than
+    /// `now` — audio that was delivered has already been captured, and a
+    /// future timestamp would hold the watchdog off.
+    nonisolated static func bufferEndTicks(start: UInt64, hostTimeValid: Bool, frames: AVAudioFrameCount,
+                                           sampleRate: Double, ticksPerSecond: Double, now: UInt64) -> UInt64 {
+        let begin = hostTimeValid ? start : now
+        let duration = Double(frames) * ticksPerSecond / sampleRate
+        guard duration.isFinite, duration >= 0, duration < Double(UInt64.max / 2) else { return min(begin, now) }
+        let (end, overflow) = begin.addingReportingOverflow(UInt64(duration))
+        return overflow ? now : min(end, now)
+    }
+
+    /// The wall-clock instant of host time `ticks`: `wallNow` minus the host
+    /// time since then (0 when `ticks` is not before `hostNow`).
+    static func wallTime(ofHostTicks ticks: UInt64, hostNow: UInt64, wallNow: Date,
+                         ticksPerSecond: Double) -> Date {
+        guard hostNow > ticks, ticksPerSecond.isFinite, ticksPerSecond > 0 else { return wallNow }
+        return wallNow.addingTimeInterval(-Double(hostNow - ticks) / ticksPerSecond)
+    }
+
+    /// Writes zeros covering the host-time gap since the last buffer ended,
+    /// so a mic segment captured after a restart lands at the right offset
     /// relative to the system track (the transcript merges the two by
-    /// timestamp). Called only while no tap is installed.
+    /// timestamp). Host time does not advance in a sleep, so a sleep is not
+    /// padded. Called only while no tap is installed.
     @MainActor
     private func padGapWithSilence() {
-        guard let file, let last = lastBufferAt else { return }
-        if let sleepingSince {
-            // Restart fired between willSleep and didWake: the gap is mostly
-            // sleep. Don't pad; restart the stall clock from here.
-            micLog.notice("mic restart during sleep/wake (asleep since \(sleepingSince.formatted(.iso8601), privacy: .public)); gap of \(String(format: "%.1f", Date().timeIntervalSince(last)), privacy: .public) s not padded")
-            stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
+        guard let file else { return }
+        let hostNow = clock.hostTicks()
+        let gap: Double
+        switch Self.padPlan(lastHostEnd: stats.lastHostEndTicks.load(ordering: .relaxed), hostNow: hostNow,
+                            ticksPerSecond: clock.ticksPerSecond, maxPadSeconds: Self.maxPadSeconds,
+                            minimum: Self.minPadSeconds) {
+        case .none:
             return
-        }
-        let rawGap = Date().timeIntervalSince(last)
-        guard rawGap.isFinite, rawGap > 0.05 else { return }
-        let gap = min(rawGap, Self.maxPadSeconds)
-        if rawGap > Self.maxPadSeconds {
+        case .pad(let seconds):
+            gap = seconds
+        case .capped(let seconds, let rawGap):
+            gap = seconds
             micLog.error("mic gap of \(String(format: "%.1f", rawGap), privacy: .public) s exceeds the \(Int(Self.maxPadSeconds), privacy: .public) s pad cap (clock jump or unseen sleep?); padding only \(Int(gap), privacy: .public) s")
         }
         let format = file.processingFormat
@@ -289,9 +329,9 @@ final class MicCapture: @unchecked Sendable {
             remaining -= Int(zeros.frameLength)
         }
         stats.paddedSeconds += gap
-        // The padding stands in for the dead stretch; the stall clock
-        // restarts from here.
-        stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
+        // The padding stands in for the dead stretch up to hostNow; the stall
+        // clock restarts from there.
+        stats.lastHostEndTicks.store(hostNow, ordering: .relaxed)
         micLog.notice("padded mic track with \(String(format: "%.1f", gap), privacy: .public) s of silence across the restart")
     }
 
@@ -405,7 +445,8 @@ final class MicCapture: @unchecked Sendable {
         // then traps the first time the audio thread calls it (SIGTRAP in
         // dispatch_assert_queue — reproduced with the --mic-test harness).
         input.installTap(onBus: 0, bufferSize: 4096, format: format,
-                         block: Self.tapBlock(stats: stats, audioFile: audioFile, needsMonoCopy: needsMonoCopy,
+                         block: Self.tapBlock(stats: stats, clock: clock, audioFile: audioFile,
+                                              needsMonoCopy: needsMonoCopy,
                                               monoInputFormat: monoInputFormat, converter: converter,
                                               fileFormat: fileFormat))
 
@@ -415,16 +456,17 @@ final class MicCapture: @unchecked Sendable {
             input.removeTap(onBus: 0)
             throw MicCaptureError.engineStartFailed(underlying: error)
         }
-        backoff.noteAttached()
+        backoff.noteAttached(at: clock.wall())
     }
 
     /// The per-buffer tap. nonisolated so the closure carries no actor
     /// isolation (see the call site). Writes to `audioFile` only from the
     /// audio thread while installed.
-    private nonisolated static func tapBlock(stats: TapStats, audioFile: AVAudioFile, needsMonoCopy: Bool,
+    private nonisolated static func tapBlock(stats: TapStats, clock: any CaptureClock, audioFile: AVAudioFile,
+                                             needsMonoCopy: Bool,
                                              monoInputFormat: AVAudioFormat, converter: AVAudioConverter?,
                                              fileFormat: AVAudioFormat) -> AVAudioNodeTapBlock {
-        return { buffer, _ in
+        return { buffer, when in
                 // Sample-content check so we can tell silent-buffer vs no-buffer
                 // cases apart in the post-recording log. Cheap: peek one
                 // channel of float32; skip if format is something else.
@@ -446,7 +488,11 @@ final class MicCapture: @unchecked Sendable {
                 } else {
                     stats.frameCount &+= UInt64(buffer.frameLength)
                 }
-                stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
+                stats.lastHostEndTicks.store(
+                    Self.bufferEndTicks(start: when.hostTime, hostTimeValid: when.isHostTimeValid,
+                                        frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
+                                        ticksPerSecond: clock.ticksPerSecond, now: clock.hostTicks()),
+                    ordering: .relaxed)
                 do {
                     var toWrite = buffer
                     if needsMonoCopy {
@@ -482,7 +528,6 @@ final class MicCapture: @unchecked Sendable {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         sleepObservers = []
-        sleepingSince = nil
         restartTask?.cancel()
         restartTask = nil
         engine.inputNode.removeTap(onBus: 0)

@@ -14,6 +14,9 @@
 //                    Atomic<UInt64> (an Optional<Date> is 16 bytes and would
 //                    tear). 0 means "none yet".
 //   HostClock        mach_absolute_time ticks per second.
+//   CaptureClock     host ticks + wall time + ticks per second behind a
+//                    protocol, so a test can make wall time run ahead of
+//                    host time (a sleep). MachClock is the real one.
 //   CaptureSignal    the amplitude above which a sample counts as signal.
 //
 
@@ -90,6 +93,21 @@ enum HostClock {
         mach_timebase_info(&tb)
         return 1e9 * Double(tb.denom) / Double(tb.numer)
     }()
+}
+
+/// The two clocks a capture engine reads: host time (mach_absolute_time,
+/// which does not advance while the Mac sleeps) and wall time.
+protocol CaptureClock: Sendable {
+    func hostTicks() -> UInt64
+    func wall() -> Date
+    var ticksPerSecond: Double { get }
+}
+
+/// mach_absolute_time and Date().
+struct MachClock: CaptureClock {
+    func hostTicks() -> UInt64 { mach_absolute_time() }
+    func wall() -> Date { Date() }
+    var ticksPerSecond: Double { HostClock.ticksPerSecond }
 }
 
 enum CaptureSignal {
