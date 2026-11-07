@@ -24,11 +24,12 @@ final class RecordingSession {
     private(set) var slot: OutboxSlot?
     private(set) var meta: RecordingMeta?
     private var systemAudio: (any SystemAudioEngine)?
+    private var selectedSystemAudioEngine: SystemAudioEngineKind?
     private var mic: MicCapture?
 
-    // Called when SCStream stops outside of our control (system "Stop
-    // Share", revoked Screen Recording permission, etc.). The handler
-    // is expected to call stop() to flush the mic + write meta.json.
+    // Called when the selected system-audio engine stops outside our control
+    // (capture stopped, permission revoked, etc.). The handler is expected to
+    // call stop() to flush the mic + write meta.json.
     var onUnexpectedStop: (@MainActor () -> Void)?
 
     var isRunning: Bool { slot != nil }
@@ -41,8 +42,8 @@ final class RecordingSession {
     }
 
     /// Live system-audio peak amplitude since last query (0.0 — 1.0).
-    /// Same UX purpose as micPeak — confirms ScreenCaptureKit is
-    /// actually delivering audio samples.
+    /// Same UX purpose as micPeak — confirms the selected system-audio engine
+    /// is actually delivering audio samples.
     func systemPeak() -> Float {
         systemAudio?.snapshotPeak() ?? 0
     }
@@ -70,6 +71,11 @@ final class RecordingSession {
     func systemStalledSince() -> Date? { systemAudio?.stalledSince }
     /// The system-audio file writer failed; a stream restart can't fix it.
     func systemWriterFailed() -> Bool { systemAudio?.hasWriterFailed ?? false }
+    /// The engine selected when this recording started. Keep it after stop so
+    /// the external-stop alert can still name the grant that was in use.
+    func systemAudioEngineKind() -> SystemAudioEngineKind {
+        selectedSystemAudioEngine ?? Config.systemAudioEngine()
+    }
     /// Long run of pure digital zeros with buffers flowing — on the tap
     /// engine, the likely sign of a missing System Audio Recording grant
     /// (or simply nothing playing). Always false on ScreenCaptureKit.
@@ -130,6 +136,7 @@ final class RecordingSession {
         // calendar tag next to the capture files and finishes the slot.
         try Outbox.writeMeta(meta, to: slot.metaURL)
 
+        selectedSystemAudioEngine = Config.systemAudioEngine()
         let systemAudio = SystemAudioEngines.make(outputURL: slot.systemAudioURL)
         let mic = MicCapture(outputURL: slot.micAudioURL)
         systemAudio.onUnexpectedStop = { [weak self] in

@@ -57,6 +57,11 @@ jobs:
       - name: Build
         run: swift build
 
+      # swift-testing suite. Xcode is selected above, so plain `swift test`
+      # finds the Testing module. Needs no models, no microphone, no TCC.
+      - name: Tests (swift test)
+        run: swift test
+
       # Text-cleanup self-check. Needs no models, no microphone, no TCC.
       - name: Self-check (--cleanup-test)
         run: swift run minnas --cleanup-test

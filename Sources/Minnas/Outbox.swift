@@ -580,7 +580,13 @@ enum Outbox {
 }
 
 enum AppInfo {
-    static let version = "0.1.0"
+    static let fallbackVersion = "0.1.2"
+    static let version = version(from: Bundle.main.infoDictionary)
+
+    static func version(from infoDictionary: [String: Any]?) -> String {
+        infoDictionary?["CFBundleShortVersionString"] as? String ?? fallbackVersion
+    }
+
     // What captured the audio, written to meta.json and the transcript's
     // frontmatter: a recording made on this Mac, an imported phone memo, or
     // a file transcribed via "Transcribe Audio File…".

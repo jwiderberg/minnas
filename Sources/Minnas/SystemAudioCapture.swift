@@ -44,22 +44,62 @@ final class FinishLatch: Sendable {
     func claim() -> Bool { !claimed.exchange(true, ordering: .acquiringAndReleasing) }
 }
 
+/// Thread ownership (why `@unchecked Sendable` is sound here):
+///
+/// - Main actor: `running`, `restartTask`, `attachedAt`, `silentRestarts`,
+///   `restartCount`, `stalledSince`, and `stream`. start() and startStream()
+///   are nonisolated and assign `stream` right after startCapture returns,
+///   before RecordingSession returns from start, i.e. before the recording
+///   tick can call checkHealth; every later assignment is @MainActor. A
+///   buffer SCKit delivers in the moment between startCapture returning and
+///   that assignment fails the identity check below and is dropped; the
+///   next buffer's gap fill covers it. The delivery queue never reads
+///   `stream` itself, only its mirrored identity.
+/// - Written by start() only while no stream is delivering, read on the
+///   delivery queue: `filter`, `config`, `writer`, `audioInput`. start()
+///   sets them before the first startStream; stop() releases `writer` and
+///   `audioInput` ON the write queue, so a buffer still in flight after a
+///   timed-out finish cannot race the release.
+/// - `writeQueue` (SCKit's sample-handler queue for every stream we
+///   create): `sessionStarted`, `lastPTSEnd`, `lastFormat`,
+///   `fillGapOnNextBuffer` (the restart path sets it with
+///   `writeQueue.async`, never directly).
+/// - Shared across threads, so atomic or locked: `currentStreamID` (the
+///   identity of `stream`, mirrored by its didSet, compared on the delivery
+///   queue), `stopRequested` (behind `stoppingByRequest`; also read by the
+///   delegate on SCKit's queue), `peakBits`, `signalLatch`, `paddedBits`,
+///   and the counters below.
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SystemAudioEngine, @unchecked Sendable {
     private let outputURL: URL
-    private var stream: SCStream?
+    private var stream: SCStream? {
+        didSet { currentStreamID.withLock { $0 = stream.map(ObjectIdentifier.init) } }
+    }
+    /// Identity of `stream` for the delivery queue's stale-buffer check. The
+    /// SCStream object itself is only touched by the main actor.
+    private let currentStreamID = Mutex<ObjectIdentifier?>(nil)
     private var filter: SCContentFilter?
     private var config: SCStreamConfiguration?
     private var writer: AVAssetWriter?
     private var audioInput: AVAssetWriterInput?
     private var sessionStarted = false
-    private var stoppingByRequest = false
+    /// Set by stop() on the main actor, read there and by the delegate's
+    /// didStopWithError on SCKit's queue.
+    private let stopRequested = Atomic<Bool>(false)
+    private var stoppingByRequest: Bool {
+        get { stopRequested.load(ordering: .acquiring) }
+        set { stopRequested.store(newValue, ordering: .releasing) }
+    }
     private var running = false
-    private var peakAmplitude: Float = 0
+    /// Float bit pattern of the peak since the last snapshotPeak (delivery
+    /// queue writes, main actor exchanges). A lost update only nudges the
+    /// meter.
+    private let peakBits = Atomic<UInt32>(0)
     // Latches true once any real (non-silent) audio arrives. Stays false
     // when the stream only ever delivers digital silence (the broken-capture
     // case), which the pre-flight check uses to warn early. Written from the
-    // SCKit delivery queue, read from MainActor — a bool latch is safe.
-    private(set) var hasSignal = false
+    // SCKit delivery queue, read from MainActor.
+    private let signalLatch = Atomic<Bool>(false)
+    var hasSignal: Bool { signalLatch.load(ordering: .relaxed) }
     // Wall-clock of the last non-silent buffer (auto-stop). Bit pattern of an
     // epoch Double, so the SCKit-delivery-queue write and the MainActor read
     // are a single atomic 64-bit access (an Optional<Date> is 16 bytes and
@@ -76,7 +116,13 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     private var lastPTSEnd: CMTime = .invalid
     private var lastFormat: CMFormatDescription?
     private var fillGapOnNextBuffer = false
-    private var paddedSeconds: Double = 0
+    /// Double bit pattern of the padded total: written only by fillGap on
+    /// the delivery queue, read by the main actor (capture_health, stop log).
+    private let paddedBits = Atomic<UInt64>(0)
+    private var paddedSeconds: Double {
+        get { Double(bitPattern: paddedBits.load(ordering: .relaxed)) }
+        set { paddedBits.store(newValue.bitPattern, ordering: .relaxed) }
+    }
     private var restartTask: Task<Void, Never>?
     private var attachedAt = Date.distantPast
     private var silentRestarts = 0
@@ -119,11 +165,9 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     }
 
     /// Live peak amplitude since last query (0.0 — 1.0). Used by the
-    /// menubar level meter. Atomic float read on arm64 is safe enough.
+    /// menubar level meter.
     func snapshotPeak() -> Float {
-        let p = peakAmplitude
-        peakAmplitude = 0
-        return p
+        Float(bitPattern: peakBits.exchange(0, ordering: .relaxed))
     }
 
     func start() async throws {
@@ -197,9 +241,14 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
         ]
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         input.expectsMediaDataInRealTime = true
-        if writer.canAdd(input) {
-            writer.add(input)
+        // Without the input, startWriting would succeed and every append
+        // would fail — a recording of nothing that looks healthy at start.
+        guard writer.canAdd(input) else {
+            throw SystemAudioCaptureError.writerInitFailed(
+                underlying: NSError(domain: "SystemAudioCapture", code: -3,
+                                    userInfo: [NSLocalizedDescriptionKey: "asset writer refused the audio input (canAdd == false)"]))
         }
+        writer.add(input)
         self.writer = writer
         self.audioInput = input
 
@@ -371,8 +420,15 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
             }
         }
         sysLog.notice("stop: buffers=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSeconds), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(writerTimedOut, privacy: .public)")
-        writer = nil
-        audioInput = nil
+        // Released on the write queue, not here: after a timed-out finish
+        // that queue may still be blocked with a buffer in flight that reads
+        // `writer`/`audioInput`; clearing them from this actor would race it.
+        // A recording gets a fresh engine instance, so nothing reads them
+        // again from this side.
+        writeQueue.async { [self] in
+            self.writer = nil
+            self.audioInput = nil
+        }
     }
 
     // MARK: SCStreamDelegate
@@ -395,8 +451,10 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
         guard let writer, let input = audioInput else { return }
         guard sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
         // A buffer from a stream we've already replaced must not land
-        // between the restart's padding and the new stream's audio.
-        guard stream === self.stream else { return }
+        // between the restart's padding and the new stream's audio. Compared
+        // by identity through the lock: `self.stream` belongs to the main
+        // actor.
+        guard currentStreamID.withLock({ $0 }) == ObjectIdentifier(stream) else { return }
 
         if !sessionStarted {
             writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
@@ -519,11 +577,11 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
                 let v = abs(samples[i])
                 if v > localPeak { localPeak = v }
             }
-            if localPeak > self.peakAmplitude {
-                self.peakAmplitude = localPeak
+            if localPeak > Float(bitPattern: self.peakBits.load(ordering: .relaxed)) {
+                self.peakBits.store(localPeak.bitPattern, ordering: .relaxed)
             }
             if localPeak > 0.0001 {
-                self.hasSignal = true
+                self.signalLatch.store(true, ordering: .relaxed)
                 self.lastSignalBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
             }
         }

@@ -35,6 +35,7 @@ bash scripts/make-app.sh          # build + assemble + sign .build/Minnas.app
 open .build/Minnas.app            # launch the menubar app
 swift run minnas --cleanup-test   # transcript text filters; run after touching TranscriptBuilder
 swift run minnas --self-test      # RetrySchedule + pruning rule
+bash scripts/test.sh   # swift-testing suite (selects the Xcode toolchain if needed)
 bash -n scripts/*.sh
 ```
 
@@ -108,6 +109,13 @@ of a meeting while the menubar keeps saying "recording". The rules:
   (with an alert), and restart exhaustion is terminal (`running = false`
   before `onUnexpectedStop`). A writer refusing data (disk full) raises a
   critical alert — a stream restart can't fix a file.
+- `MicCapture`'s 20-attempt restart batch is not terminal, unlike both system
+  engines: `running` stays true and the watchdog starts another batch (about
+  3 s apart after failed attaches when a buffer had been delivered, since the
+  attempt's padding, when there is a gap to pad, resets the stall clock;
+  straight away when nothing was ever delivered), because a mic comes back
+  when a device is plugged in; a mic that stays dead is reported by the 10 s
+  stalled alert.
 - The menubar shows `✗` for a track while a restart is pending; a critical
   alert fires if it stays dead 10 s, and another if the mic delivers pure
   digital zeros for 2 min after having had signal.
@@ -217,8 +225,9 @@ of a meeting while the menubar keeps saying "recording". The rules:
   runs during silence) and `sck` (`SystemAudioCapture`: ScreenCaptureKit,
   needs Screen Recording). Chosen by `settings.systemAudioEngine` /
   `SYSTEM_AUDIO_ENGINE`. Without the grant the tap delivers silence;
-  `permissionSuspect` flags 15 s of zeros but cannot tell "denied" from
-  "nothing playing".
+  `permissionSuspect` flags 10 s of zeros (so it is set before the 15 s
+  silence pre-flight reads it) but cannot tell "denied" from "nothing
+  playing".
 - **UI:** `SettingsWindow` (General / Transcription / Cloud / Calendar /
   Permissions; AppKit; every control writes through `Settings.shared`),
   `Onboarding` (4 steps on first launch, `settings.onboardingCompleted`;
@@ -229,8 +238,8 @@ of a meeting while the menubar keeps saying "recording". The rules:
 - **Distribution:** `scripts/install.sh` (build from source, local signing
   identity after an explicit yes, copy to /Applications, prints the usage
   strings from Info.plist; `--dry-run`) and `scripts/uninstall.sh` (asks per
-  item; `tccutil reset`s). CI builds, runs `--cleanup-test` and
-  `--self-test`, and dry-runs both scripts.
+  item; `tccutil reset`s). CI builds, runs `swift test`, `--cleanup-test`
+  and `--self-test`, and dry-runs both scripts.
 
 ## App bundle, TCC and the signing identity
 

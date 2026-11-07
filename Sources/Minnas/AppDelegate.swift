@@ -8,8 +8,8 @@
 //
 // State is held by AppDelegate (recording in RecordingSession, transcription
 // status in `transcribingTitle`). Only one transcription runs at a time —
-// the Transcriber actor serializes calls, but we also keep the menu
-// pointing at the most recent in-flight job.
+// `transcribeChain` serializes jobs and keeps the menu pointing at the active
+// one while later jobs wait in order.
 //
 
 import AppKit
@@ -103,6 +103,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // fd holding the single-instance flock on outbox/.lock. Never closed:
     // the kernel drops the lock when the process exits, however it exits.
     private var instanceLockFD: Int32 = -1
+
+    /// The grant a system-audio engine needs, as System Settings › Privacy &
+    /// Security names it.
+    nonisolated static func systemAudioPermissionName(for engine: SystemAudioEngineKind) -> String {
+        switch engine {
+        case .sck: "Screen Recording"
+        case .taps: "System Audio Recording"
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // A second instance would "recover" the first one's live recording
@@ -456,9 +465,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleExternalStop() {
-        // SCStream stopped outside our control (system "Stop Share" or
-        // revoked permission). Flush mic, write meta.json, alert the
-        // user, then transcribe the partial anyway — they'll at least
+        // The selected system-audio engine stopped outside our control
+        // (capture stopped or permission revoked). Flush mic, write meta.json,
+        // alert the user, then transcribe the partial anyway — they'll at least
         // get something for what was captured.
         guard session.isRunning else { return }
         Task { @MainActor in
@@ -466,12 +475,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isStopping = true
             defer { isStopping = false }
             let title = session.meta?.title ?? "untitled"
+            let engine = session.systemAudioEngineKind()
             do {
                 let slot = try await session.stop()
                 refreshStatusItem()
                 let alert = NSAlert()
                 alert.messageText = "Recording stopped: system audio is gone."
-                alert.informativeText = "The system-audio stream stopped and could not be restarted in 20 attempts — most likely the \(Self.systemAudioPermissionName) permission was revoked. Transcribing what was captured. Re-grant the permission and start a new recording."
+                let permission = Self.systemAudioPermissionName(for: engine)
+                alert.informativeText = "The system-audio stream stopped and could not be restarted in 20 attempts — most likely the \(permission) permission was revoked. Transcribing what was captured. Re-grant the permission and start a new recording."
                 alert.alertStyle = .critical
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
@@ -613,11 +624,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // second visually) and the mic level meter, which needs the
         // higher refresh rate to feel responsive. The closure is
         // non-isolated; hop to MainActor before touching UI.
-        recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.tickRecordingIndicator()
             }
         }
+        recordingTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func stopRecordingTimer() {
@@ -680,9 +693,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func alertStreamStalled(stream: String) {
         let device = AudioRoute.defaultInputDeviceName() ?? "unknown"
         let other = stream == "microphone" ? "System audio is" : "The microphone is"
-        let hint = stream == "microphone"
-            ? "The input is \"\(device)\". Check System Settings → Sound → Input,"
-            : "Check System Settings → Privacy & Security → \(Self.systemAudioPermissionName),"
+        let hint: String
+        if stream == "microphone" {
+            hint = "The input is \"\(device)\". Check System Settings → Sound → Input,"
+        } else {
+            let permission = Self.systemAudioPermissionName(for: session.systemAudioEngineKind())
+            if session.systemPermissionSuspect() {
+                hint = "The engine delivered only digital zeros before it stalled, which is what a missing \(permission) grant looks like. Check System Settings → Privacy & Security → \(permission),"
+            } else {
+                hint = "Check System Settings → Privacy & Security → \(permission),"
+            }
+        }
         let alert = NSAlert()
         alert.messageText = "\(stream.capitalized) stopped"
         alert.informativeText = "The \(stream) stream stopped delivering audio and hasn't come back after 10 s. The recorder keeps retrying every second; \(other) still being captured. \(hint) or stop and start a new recording."
@@ -820,8 +841,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard session.isRunning else { return }
             var silent: [String] = []
             let micSilent = !session.micHasSignal()
+            let systemSilent = !session.systemHasSignal()
             if micSilent { silent.append("microphone") }
-            if !session.systemHasSignal() { silent.append("system audio") }
+            if systemSilent { silent.append("system audio") }
             guard !silent.isEmpty else { return }
 
             let which = silent.joined(separator: " and ")
@@ -837,9 +859,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                        ? " — that's likely capturing silence; switch the input to your built-in mic in System Settings → Sound and re-record."
                        : ".")
             }
+            var systemHint = ""
+            if systemSilent {
+                let permission = Self.systemAudioPermissionName(for: session.systemAudioEngineKind())
+                if session.systemPermissionSuspect() {
+                    systemHint = " The system audio engine delivered only digital zeros, which is what a missing \(permission) grant looks like. Check System Settings → Privacy & Security → \(permission)."
+                } else {
+                    systemHint = " Check System Settings → Privacy & Security → \(permission) and make sure audio is playing."
+                }
+            }
             let alert = NSAlert()
             alert.messageText = "No \(which) detected"
-            alert.informativeText = "15s in, the \(which) \(verb) captured only silence. Recording continues, but check the \(Self.systemAudioPermissionName) permission (for system audio) and that audio is playing / your mic is live — a stream that stays silent won't appear in the transcript.\(micHint)"
+            alert.informativeText = "15s in, the \(which) \(verb) captured only silence.\(systemHint) Recording continues; a stream that stays silent won't appear in the transcript.\(micHint)"
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Keep Recording")
             alert.addButton(withTitle: "Stop")
@@ -1403,12 +1434,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // First tick happens after the interval — by then the
         // post-transcription delivery has had a chance to either
         // succeed or land in the retry queue with attempt count >= 1.
-        deliveryRetryTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.deliveryRetryTickInterval,
-            repeats: true
-        ) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.deliveryRetryTickInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tickDeliveryRetry() }
         }
+        deliveryRetryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func tickDeliveryRetry() {
@@ -1453,12 +1483,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let url = Outbox.rootURL
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         NSWorkspace.shared.open(url)
-    }
-
-    /// The grant the configured system-audio engine needs, as System
-    /// Settings › Privacy & Security names it.
-    private static var systemAudioPermissionName: String {
-        Config.systemAudioEngine() == .sck ? "Screen Recording" : "System Audio Recording"
     }
 
     private static var appName: String {

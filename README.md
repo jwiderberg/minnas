@@ -340,6 +340,7 @@ swift build                       # compile check, no bundle
 bash scripts/make-app.sh          # build and assemble .build/Minnas.app
 swift run minnas --cleanup-test   # transcript-cleanup self-check, no models, no permissions
 swift run minnas --self-test      # delivery backoff and pruning rules
+bash scripts/test.sh              # swift-testing suite, no models, no permissions
 bash -n scripts/*.sh              # shell syntax check
 ```
 
@@ -362,12 +363,12 @@ Test any change to the capture code with a real run while you switch the
 default input or output device. `CLAUDE.md` holds the engineering rules.
 
 Continuous integration (`.github/workflows/ci.yml`) builds the package, runs
-`--cleanup-test` and `--self-test`, and checks the shell scripts (syntax and
-dry runs). It downloads no models and needs no permissions. It runs on the
-`macos-15` image and selects that image's Xcode 26 install, failing if there
-is none. That is Swift 6.2, the oldest toolchain the package supports and
-stricter about concurrency than Xcode 26.6's Swift 6.3, so a build that
-passes locally on a newer Xcode can still fail there.
+`swift test`, `--cleanup-test` and `--self-test`, and checks the shell
+scripts (syntax and dry runs). It downloads no models and needs no
+permissions. It runs on the `macos-15` image and selects that image's Xcode
+26 install, failing if there is none. That is Swift 6.2, the oldest toolchain
+the package supports and stricter about concurrency than Xcode 26.6's Swift
+6.3, so a build that passes locally on a newer Xcode can still fail there.
 
 `Package.resolved` is committed: a build of a given commit uses exactly the
 dependency versions it names. Update it on purpose with

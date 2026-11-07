@@ -229,7 +229,23 @@ final class MicCapture: @unchecked Sendable {
                     try? await Task.sleep(for: .seconds(1))
                 }
             }
-            micLog.error("mic restart gave up after 20 attempts")
+            // Not terminal, on purpose, unlike both system engines (which
+            // clear `running` and fire onUnexpectedStop here): a mic comes
+            // back when a device is plugged in, so `running` stays true and
+            // the next checkHealth starts another batch once its threshold
+            // (min(60, 3·2^silentRestarts) s since the last buffer or pad)
+            // has passed. A failed attempt that follows a delivered buffer
+            // pads the gap (when it is over 0.05 s and the pad can be
+            // written) and that resets the stall clock, so after such a
+            // batch the threshold is the 3 s floor and batches run roughly
+            // 3 s apart, one attempt a second; if the mic never delivered
+            // there is nothing to pad and the next batch starts on the next
+            // tick.
+            // A mic that stays dead is reported by AppDelegate's 10 s
+            // stalled alert (stalledSince stays set until an attach
+            // succeeds); a mic that delivers only digital zeros, by the
+            // 2-minute zeros alert.
+            micLog.error("mic restart gave up after 20 attempts; the watchdog will retry after the backoff")
         }
     }
 

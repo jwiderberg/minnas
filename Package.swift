@@ -39,8 +39,15 @@ let package = Package(
             ],
             path: "Sources/Minnas"
         ),
-        // No XCTest target yet: the pure-logic checks run as CLI harnesses
-        // (`minnas --cleanup-test`, `minnas --self-test`), which build with
-        // the Command Line Tools alone.
+        // swift-testing (`import Testing`). `swift test` needs the Xcode
+        // toolchain selected: with only the Command Line Tools active the
+        // Testing module is not found, which is what scripts/test.sh works
+        // around. The executable target is imported @testable; SwiftPM
+        // renames its entry point.
+        .testTarget(
+            name: "MinnasTests",
+            dependencies: ["Minnas"],
+            path: "Tests/MinnasTests"
+        ),
     ]
 )

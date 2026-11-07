@@ -1,19 +1,19 @@
 //
-// Builds transcript.md from two parallel WhisperKit transcriptions
-// (mic + system) and aggregates per-language audio fractions.
+// Builds transcript.md from the per-stream transcriptions (mic + system,
+// or the one stream of an import) and aggregates per-language audio
+// fractions.
 //
-// Each TranscriptionResult carries its own detected language; one audio
-// file can produce multiple results (one per chunk) when WhisperKit's
-// internal chunker splits long audio. We interleave all segments by
-// start time and group consecutive same-speaker segments into one
-// paragraph.
+// Each STTResult carries its own language; one audio file produces several
+// results (one per 30 s decode window locally, one per chunk in the cloud).
+// We interleave all segments by start time and group consecutive
+// same-speaker segments into one paragraph.
 //
 // Timestamp alignment caveat: each .caf has its own t=0. The mic stream
 // starts within milliseconds of session.start(); ScreenCaptureKit warms
 // up over ~0.5–7s before its first sample, so its t=0 is offset later.
-// We don't currently track that offset, so the very first few segments
-// of a meeting may interleave in slightly the wrong order. That's
-// accepted for now — the rest of the transcript is correct.
+// That offset is not tracked, so the very first few segments of a meeting
+// may interleave in slightly the wrong order; the rest of the transcript
+// is unaffected.
 //
 
 import Foundation
@@ -115,8 +115,13 @@ enum TranscriptBuilder {
         // tuned if it ever eats real speech.
         let beforeFilter = all.count
         // Besides the stock phrases: repetition loops ("*Penis" × 30, one
-        // word over and over) and the same short segment repeated window
-        // after window on silence ("All right." every 30 s) — keep one.
+        // word over and over) and the same segment text repeated window
+        // after window on silence ("All right." every 30 s) — keep the
+        // first two of a run, drop the rest. Two, not one: the run key is
+        // the text alone, across speakers, so a real exchange ("Yes." from
+        // Me, "Yes." from Them) must not lose its second half; a silence
+        // loop runs to many copies, so two left over is still clean.
+        let maxRepeats = 2
         var filtered: [Labeled] = []
         var runText: String?
         var runLength = 0
@@ -124,7 +129,7 @@ enum TranscriptBuilder {
             let key = cleanText(item.text, language: item.language).lowercased()
             if key == runText {
                 runLength += 1
-                if runLength > 2 { continue }
+                if runLength > maxRepeats { continue }
             } else {
                 runText = key
                 runLength = 1
@@ -279,10 +284,6 @@ enum TranscriptBuilder {
         return Double(Set(words).count) / Double(words.count) < 0.34
     }
 
-    /// Detects Whisper's stock-phrase hallucinations on silence.
-    /// Normalization: strip Whisper tokens, trim, lowercase, drop
-    /// trailing/leading punctuation so "Thank you." == "thank you" ==
-    /// "Thank you!".
     /// In a 1:1 (exactly one attendee other than the operator, identified by
     /// OWNER_EMAIL), returns that person's name to label the system speaker.
     /// nil when there are 0 or 2+ others, no name, or OWNER_EMAIL is unset.
@@ -297,12 +298,18 @@ enum TranscriptBuilder {
         return String(Outbox.normalizeTitle(raw).prefix(100))
     }
 
+    /// Detects Whisper's stock-phrase hallucinations on silence.
+    /// Normalization: strip Whisper tokens, trim, lowercase, drop
+    /// trailing/leading punctuation so "Thank you." == "thank you" ==
+    /// "Thank you!". Then the shape rules in `isInventedCaption`, which see
+    /// the text with its case (a credit names someone, and names are
+    /// capitalised).
     static func isKnownHallucination(_ rawText: String) -> Bool {
         let stripped = stripWhisperTokens(rawText)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
         let punct = CharacterSet.punctuationCharacters
         let normalized = stripped
+            .lowercased()
             .trimmingCharacters(in: punct)
             .trimmingCharacters(in: .whitespaces)
         if knownHallucinations.contains(normalized) { return true }
@@ -311,30 +318,65 @@ enum TranscriptBuilder {
 
     // Whisper was trained on subtitle files, so on silence it emits the
     // credits those files end with — in whatever form, not just the exact
-    // lines in the blocklist above. Two shapes catch the rest:
-    //   • a credit line: starts with a subtitle/translation word and names
-    //     who did it ("Subtitles by …", "Undertexter av …",
-    //     "Översättning: …", "Transcribed by …", "Captioning by …")
-    //   • a watermark: a short line containing a web domain
-    //     ("www.zeoranger.co.uk", "textning.nu", "amara.org")
+    // lines in the blocklist above. Two shapes catch the rest, and both
+    // describe a WHOLE line, because real speech opens with the same words
+    // ("Translation from Swedish takes longer", "Sync from main before you
+    // push", "I read it on textning.nu yesterday"):
+    //   • a credit line: nothing but one or more credits. A credit is a
+    //     credit word, at most two filler words, by/av/från/from and a name
+    //     of one to three name-like tokens ("Subtitles by Jane Doe",
+    //     "Undertexter av Lisa Larsson", "Sync and corrections by n17t01"),
+    //     or the colon form with a name-like value ("Översättning: Kalle
+    //     Anka"). Credits may be chained with , ; & / and/och ("Transcribed
+    //     by ESO, translated by —"). A name-like token starts with a capital
+    //     or a digit, contains a digit, is a domain or handle, is a dash, or
+    //     is a connector ("the", "van", "och", "community", …) — so "from
+    //     Swedish takes longer" is not a name and the line stays.
+    //   • a watermark: a line that is essentially just a web domain — at
+    //     most three other tokens ("www.zeoranger.co.uk", "Mer på
+    //     textning.nu") — not a sentence that mentions a site.
     // plus the bracketed sound tags some models produce on silence
     // ("[BLANK_AUDIO]", "(upbeat music)", "[Music]").
-    private static let creditLineRegex = try! NSRegularExpression(
-        pattern: #"^\W*(subtitles?|subtitled|captions?|captioned|captioning|closed captions?|transcri(bed|ption|pt)|translat(ed|ion|ions)|text(ning|at|ad|ning\.nu)?|undertext(er|ning|ad|ade)?|övers(ättning|att)|sync(ed|ing)?|corrected|edited)\b[^.]{0,80}\b(by|av|från|from)\b|^\W*(subtitles?|captions?|transcri(ption|pt)|undertext(er|ning)?|översättning|textning|sync|credits?)\s*:"#,
-        options: [.caseInsensitive]
-    )
+    //
+    // The credit pattern is case-SENSITIVE on purpose (names are
+    // capitalised); the words around the name are matched with (?i:…).
+    private static let creditLineRegex: NSRegularExpression = {
+        let creditWord = #"(?i:subtitles?|subtitled|captions?|captioned|captioning|closed\s+captions?|transcri(?:bed|ption|pt)|translat(?:ed|ion|ions)|text(?:ning|at|ad|ning\.nu)?|undertext(?:er|ning|ad|ade)?|övers(?:ättning|att)|sync(?:ed|ing)?|corrected|edited)"#
+        let colonWord = #"(?i:subtitles?|captions?|transcri(?:ption|pt)|translat(?:ion|ed)|undertext(?:er|ning)?|översättning|textning|sync|credits?)"#
+        let nameToken = #"(?:[\p{Lu}\p{N}@][^\s,;]*|[^\s,;]*\p{N}[^\s,;]*|[^\s,;]*\.[\p{L}\p{N}][^\s,;]*|(?i:the|de|van|von|der|den|la|le|och|and|&|community|team)|\p{Pd}+)"#
+        let name = "\(nameToken)(?:\\s+\(nameToken)){0,2}"
+        let byCredit = #"\#(creditWord)(?:\s+[^\s.,;:]+){0,2}?\s+(?i:by|av|från|from)\s+\#(name)"#
+        let colonCredit = #"\#(colonWord)\s*:\s*\#(name)"#
+        let credit = "(?:\(byCredit)|\(colonCredit))"
+        let separator = #"(?:\s*[,;&/]\s*|\s+(?i:and|och)\s+)"#
+        let pattern = #"^[\s\p{P}\p{S}]*\#(credit)(?:\#(separator)\#(credit))*[\s\p{P}\p{S}]*$"#
+        return try! NSRegularExpression(pattern: pattern)
+    }()
     private static let domainRegex = try! NSRegularExpression(
         pattern: #"(^|\s|\()(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|org|net|co\.uk|nu|se|io|tv|info|dk|no|fi|de)\b"#,
         options: [.caseInsensitive]
     )
+    /// One whitespace token that is a domain (with optional surrounding punctuation).
+    private static let domainTokenRegex = try! NSRegularExpression(
+        pattern: #"^[\p{P}\p{S}]*(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|org|net|co\.uk|nu|se|io|tv|info|dk|no|fi|de)\b[^\s]*$"#,
+        options: [.caseInsensitive]
+    )
+    private static let maxWatermarkOtherTokens = 3
     private static let soundTagRegex = try! NSRegularExpression(pattern: #"^\s*[\[(][^\])]{1,40}[\])]\s*$"#)
 
-    static func isInventedCaption(_ lowercased: String) -> Bool {
-        let range = NSRange(lowercased.startIndex..<lowercased.endIndex, in: lowercased)
-        if creditLineRegex.firstMatch(in: lowercased, range: range) != nil { return true }
-        if soundTagRegex.firstMatch(in: lowercased, range: range) != nil { return true }
-        let words = lowercased.split(whereSeparator: { $0.isWhitespace }).count
-        if words <= 8, domainRegex.firstMatch(in: lowercased, range: range) != nil { return true }
+    /// A subtitle credit, watermark or sound tag invented on silence. Takes
+    /// the token-stripped, trimmed segment text with its case intact.
+    static func isInventedCaption(_ text: String) -> Bool {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        if creditLineRegex.firstMatch(in: text, range: range) != nil { return true }
+        if soundTagRegex.firstMatch(in: text, range: range) != nil { return true }
+        if domainRegex.firstMatch(in: text, range: range) != nil {
+            let others = text.split(whereSeparator: { $0.isWhitespace }).filter { token in
+                let t = String(token)
+                return domainTokenRegex.firstMatch(in: t, range: NSRange(t.startIndex..<t.endIndex, in: t)) == nil
+            }
+            if others.count <= maxWatermarkOtherTokens { return true }
+        }
         return false
     }
 

@@ -101,11 +101,12 @@ final class Transcriber: @unchecked Sendable {
     /// pipeline or a cloud engine based on `model.engine`.
     /// `onProgress` reports a 0…1 fraction for THIS file as decoding
     /// proceeds (called off the main actor; hop before touching UI).
-    /// `language` PINS the whole file to one language ("en"/"sv"). nil
-    /// means detect: the file is transcribed in chunks starting from
-    /// `startLanguage` (the recording-wide dominant language, so both
-    /// streams begin in agreement) and each chunk may switch to another
-    /// `policy` candidate when the model is clearly more confident there.
+    /// The file is decoded in 30 s windows either way (silent windows are
+    /// skipped). `language` PINS every window to one language ("en"/"sv").
+    /// nil means detect: decoding starts from `startLanguage` (the
+    /// recording-wide dominant language, so both streams begin in
+    /// agreement) and a window may switch to another `policy` candidate
+    /// when the model is clearly more confident there.
     func transcribe(
         audioPath: String,
         model: TranscriptionModel = .default,
@@ -195,8 +196,8 @@ final class Transcriber: @unchecked Sendable {
         let starts: [Double] = stride(from: min(15, duration / 2), to: duration - 10, by: step).map { $0 }
         var scores: [String: Float] = [:]
         for start in starts {
-            guard let array = try? Self.loadWindow(audioPath, start: start, length: 30),
-                  Self.speechSeconds(array) >= 2.5 else { continue }
+            guard let array = try? Self.loadWindow(audioPath, start: start, length: DecodeWindow.seconds),
+                  Self.speechSeconds(array) >= DecodeWindow.minVoteSpeech else { continue }
             let vote = try await languageVote(pipe, array, candidates: candidates)
             traceLine("probe \(Int(start))s: \(vote.describe)")
             if let best = vote.best { scores[best.language, default: 0] += best.probability }
@@ -277,34 +278,37 @@ final class Transcriber: @unchecked Sendable {
         )
     }
 
-    /// Transcribes the file in Whisper's natural 30 s windows, each pinned
-    /// to the current language, deciding per window from the language
-    /// token restricted to the policy's candidates, over windows that decode
-    /// with ≥ 2.5 s of speech-level audio: one window at p ≥ 0.85 or two in
-    /// a row at ≥ 0.7 switches; silent or near-empty windows never vote,
-    /// and windows with < 0.5 s of speech are not decoded (hallucinations). Window boundaries follow Whisper's own segment ends — a
-    /// segment cut by the window end is dropped and re-decoded at the start
-    /// of the next window — so nothing is split mid-sentence. One STTResult
-    /// per window carries that window's language.
+    /// The one decode loop, used for every local transcription: the file
+    /// is decoded in Whisper's natural 30 s windows, each pinned to the
+    /// current language. `DecodeWindow.plan` decides per window: under
+    /// 0.5 s of speech-level audio the window is not decoded at all
+    /// (Whisper hallucinates on silence); from 2.5 s it may vote, and
+    /// `DecodeWindow.apply` turns the language token (restricted to the
+    /// policy's candidates) into a switch on one window at p ≥ 0.85 or two
+    /// in a row at ≥ 0.7. With `fixedLanguage` (an explicit pin, or a policy
+    /// with one candidate) no window votes and the language never changes;
+    /// the silence skip still applies. Window boundaries follow Whisper's
+    /// own segment ends — a segment cut by the window end is dropped and
+    /// re-decoded at the start of the next window — so nothing is split
+    /// mid-sentence. One STTResult per window carries that window's
+    /// language.
+    /// Re-rolls of a window whose first pass decoded to nothing.
+    static let maxContentlessRerolls = 2
+
     private func whisperKitTranscribeChunked(
         audioPath: String,
         model: TranscriptionModel,
         startLanguage: String,
+        fixedLanguage: Bool,
         policy: LanguagePolicy,
         onProgress: (@Sendable (Double) -> Void)?
     ) async throws -> [STTResult] {
         let pipe = try await ensureLoaded(model: model)
         let duration = CMTimeGetSeconds(try await AVURLAsset(url: URL(fileURLWithPath: audioPath)).load(.duration))
-        let window = 30.0
+        let window = DecodeWindow.seconds
         let minTail = 5.0              // fold a very short final remainder into the previous window
-        let switchNow: Float = 0.85    // one window this confident switches
-        let switchSoon: Float = 0.7    // or two content windows in a row at this
-        let minSpeech = 2.5            // seconds of speech-level audio before a window may vote
-        let skipBelow = 0.5            // below this the window isn't decoded at all
-        let speechRMS: Float = 0.01    // a degenerate pass over audio this loud is a re-roll
 
-        var language = startLanguage
-        var pending: String?           // a moderate reading of another language, awaiting confirmation
+        var state = DecodeWindow.State(language: startLanguage, fixed: fixedLanguage)
         var results: [STTResult] = []
         var t = 0.0
         while t < duration - 0.5 {
@@ -330,52 +334,43 @@ final class Transcriber: @unchecked Sendable {
                 throw TranscriberError.audioReadFailed(path: audioPath, start: t, underlying: error)
             }
 
-            // Language switching considers only windows with enough
-            // speech-level audio: on silence/breath the detector leans "en"
-            // at 0.5–0.7, which was enough to flip a Swedish meeting into a
-            // translated window. The gate is ACOUSTIC on purpose — gating
-            // on the decoded word count fails when the current language is
-            // the wrong one (pinned to "en", Swedish decodes to a few
-            // translated words, so the window never earned a vote).
-            // Measured on compressed call audio: correct-language readings are
-            // almost all ≥ 0.9, stray readings almost all < 0.7.
-            // A window with (almost) no speech-level audio is not decoded at
-            // all: Whisper hallucinates on silence — a quiet mic produces
-            // invented sentences, the same short phrase every 30 s, or one
-            // word repeated dozens of times — and the mic stream is silent whenever "Them"
-            // talk, so this is also most of its decode time saved.
+            // The gates are ACOUSTIC (speechSeconds), see DecodeWindow for
+            // why each threshold sits where it does.
             let speech = Self.speechSeconds(array)
-            if speech < skipBelow {
+            guard case .decode(let votes) = DecodeWindow.plan(speechSeconds: speech, state: state) else {
                 traceLine("chunk \(Int(t))–\(Int(end))s skipped (\(String(format: "%.1f", speech)) s of speech)")
                 onProgress?(min(1, end / max(duration, 1)))
                 t = end
                 continue
             }
             var note = ""
-            if speech >= minSpeech {
+            if votes {
                 let vote = try await languageVote(pipe, array, candidates: policy.candidates)
                 note = " [\(vote.describe)]"
-                if let best = vote.best, best.language != language {
-                    if best.probability >= switchNow || (pending == best.language && best.probability >= switchSoon) {
-                        note += " \(language)→\(best.language)"
-                        language = best.language
-                        pending = nil
-                    } else if best.probability >= switchSoon {
-                        pending = best.language
-                        note += " pending"
-                    } else {
-                        pending = nil
-                    }
-                } else {
-                    pending = nil
+                let applied = DecodeWindow.apply(
+                    detectedLanguage: vote.best?.language, probability: vote.best?.probability ?? 0, to: state
+                )
+                state = applied.0
+                switch applied.1 {
+                case .stay: break
+                case .pending: note += " pending"
+                case .switched(let from, let to): note += " \(from)→\(to)"
                 }
             }
+            let language = state.language
 
             var pass = try await decodeChunk(pipe, array, language: language, offset: t)
             // WhisperKit occasionally returns an empty/stock pass on audio
-            // that plainly has speech (temperature-fallback variance). One
-            // re-roll; silent windows (quiet mic while "Them" talk) are left.
-            if !pass.hasContent, Self.rms(array) > speechRMS {
+            // that has speech (temperature-fallback variance). Every window
+            // reaching this point has ≥ DecodeWindow.skipBelowSpeech s of
+            // speech-level audio (silent ones were skipped above), so a
+            // contentless pass is suspect: re-roll with more fallbacks, up
+            // to twice. (The old whole-file pinned path re-rolled up to five
+            // times over the whole file; a short recording is one window, so
+            // the budget here is what it gets.) Silence never reaches this.
+            var rerolls = 0
+            while !pass.hasContent, rerolls < Self.maxContentlessRerolls {
+                rerolls += 1
                 let retry = try await decodeChunk(pipe, array, language: language, offset: t, fallbacks: 5)
                 if retry.hasContent { pass = retry }
             }
@@ -415,11 +410,6 @@ final class Transcriber: @unchecked Sendable {
         return Double(loud) * 0.1
     }
 
-    private static func rms(_ array: [Float]) -> Float {
-        var value: Float = 0
-        vDSP_rmsqv(array, 1, &value, vDSP_Length(array.count))
-        return value
-    }
 
     private func whisperKitTranscribe(
         audioPath: String,
@@ -430,10 +420,17 @@ final class Transcriber: @unchecked Sendable {
         onProgress: (@Sendable (Double) -> Void)?
     ) async throws -> [STTResult] {
         // An explicit pin (caller, menu, or STT_LANGUAGE) means one
-        // language for the whole file — the original path below. A single
-        // candidate is the same thing. Otherwise detect per chunk.
+        // language for the whole file; a single candidate is the same
+        // thing. Both go through the same windowed decode as detection,
+        // with the language fixed, so silent windows are skipped there too.
+        // Whisper's own free per-window detection is never used: it flaps
+        // to whatever each 30 s window looks like (a window of call audio
+        // can come back in an unrelated language).
         if let pin = languageOverride ?? Config.sttLanguage() ?? (policy.candidates.count == 1 ? policy.primary : nil) {
-            return try await whisperKitTranscribePinned(audioPath: audioPath, model: model, language: pin, onProgress: onProgress)
+            return try await whisperKitTranscribeChunked(
+                audioPath: audioPath, model: model, startLanguage: pin, fixedLanguage: true,
+                policy: policy, onProgress: onProgress
+            )
         }
         let start: String
         if let startLanguage {
@@ -441,107 +438,10 @@ final class Transcriber: @unchecked Sendable {
         } else {
             start = (try? await resolveLanguage(forStreams: [URL(fileURLWithPath: audioPath)], model: model, policy: policy)) ?? policy.primary
         }
-        return try await whisperKitTranscribeChunked(audioPath: audioPath, model: model, startLanguage: start, policy: policy, onProgress: onProgress)
-    }
-
-    private func whisperKitTranscribePinned(
-        audioPath: String,
-        model: TranscriptionModel,
-        language: String,
-        onProgress: (@Sendable (Double) -> Void)?
-    ) async throws -> [STTResult] {
-        let pipe = try await ensureLoaded(model: model)
-        // WhisperKit is stochastically unreliable on short/quiet audio: the
-        // same file decodes to anywhere from the full transcript to a single
-        // empty or silence-hallucination ("you") token, run to run — the
-        // variance is inherent to temperature fallback, and greedy temp-0 with
-        // no fallback collapses to empty instead (worse). VAD chunking made it
-        // WORSE here: the energy detector treats quiet speech as silence and
-        // chunks it away. So: keep default windowing, and when a pass comes
-        // back degenerate (no real text — empty or only stock hallucinations)
-        // re-roll. The failure is random, so a retry almost always recovers;
-        // bounded so genuinely-silent audio can't loop.
-        // One language for every window. Whisper's own free per-window
-        // detection is never used: it flaps to whatever each 30 s window
-        // looks like (a window of call audio can come back in an unrelated
-        // language). Detection, when wanted, is the chunked path above,
-        // constrained to the policy's candidates.
-        let options = DecodingOptions(
-            task: .transcribe,
-            language: language,
-            temperature: 0,
-            temperatureFallbackCount: 5,
-            detectLanguage: false
+        return try await whisperKitTranscribeChunked(
+            audioPath: audioPath, model: model, startLanguage: start, fixedLanguage: false,
+            policy: policy, onProgress: onProgress
         )
-        // Retries reuse the already-loaded pipeline (cheap — no reload), and
-        // for normal meeting audio a degenerate pass is rare so this never
-        // fires. 5 attempts drives the residual failure rate on marginal
-        // (short/quiet) audio low without risking a long loop.
-        let maxAttempts = 5
-        var lastResults: [STTResult] = []
-        var lastSignature: String?
-        for attempt in 1...maxAttempts {
-            let results: [STTResult]
-            do {
-                let raw = try await pipe.transcribe(
-                    audioPath: audioPath,
-                    decodeOptions: options,
-                    callback: { _ in
-                        // pipe.progress tracks audio-seconds processed for
-                        // this call (0…1); forward it as the fraction.
-                        onProgress?(pipe.progress.fractionCompleted)
-                        return nil
-                    }
-                )
-                results = raw.map { result in
-                    STTResult(
-                        segments: result.segments.map {
-                            STTSegment(start: $0.start, end: $0.end, text: $0.text, speaker: nil)
-                        },
-                        language: result.language
-                    )
-                }
-            } catch {
-                throw TranscriberError.transcribeFailed(underlying: error)
-            }
-            lastResults = results
-            if !Self.isDegenerate(results) { break }
-            // A retry only helps when temperature fallback re-rolls to
-            // something different. If this degenerate pass is byte-identical
-            // to the previous one (e.g. truly silent audio greedy-decoding to
-            // the same empty result every time), further attempts are
-            // guaranteed identical — stop wasting ANE time.
-            let signature = Self.signature(of: results)
-            if signature == lastSignature {
-                transcribeLog.error("WhisperKit degenerate pass identical to previous (attempt \(attempt, privacy: .public)) — stopping retries for \(audioPath, privacy: .public)")
-                break
-            }
-            lastSignature = signature
-            transcribeLog.error("WhisperKit pass was degenerate (attempt \(attempt, privacy: .public)/\(maxAttempts, privacy: .public)) for \(audioPath, privacy: .public)")
-        }
-        return lastResults
-    }
-
-    /// Stable fingerprint of a pass's text content, for detecting a retry
-    /// that produced exactly the same (degenerate) output as the last one.
-    private static func signature(of results: [STTResult]) -> String {
-        results.flatMap { $0.segments }.map(\.text).joined(separator: "\u{1f}")
-    }
-
-    /// A pass is degenerate when no segment carries real content — every
-    /// segment is empty (just control tokens) or a stock silence
-    /// hallucination ("you", "Thank you."). Such a pass is worth retrying.
-    private static func isDegenerate(_ results: [STTResult]) -> Bool {
-        for result in results {
-            for segment in result.segments {
-                let stripped = TranscriptBuilder.stripWhisperTokens(segment.text)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !stripped.isEmpty && !TranscriptBuilder.isKnownHallucination(segment.text) {
-                    return false
-                }
-            }
-        }
-        return true
     }
 
     private func ensureLoaded(model: TranscriptionModel) async throws -> WhisperKit {
@@ -561,5 +461,88 @@ final class Transcriber: @unchecked Sendable {
         } catch {
             throw TranscriberError.loadFailed(underlying: error)
         }
+    }
+}
+
+/// The per-window decisions of `Transcriber`'s windowed decode, as pure
+/// functions so they can be tested without a model. Thresholds are in
+/// seconds of speech-level audio (`Transcriber.speechSeconds`) and in
+/// language-token probability restricted to the policy's candidates.
+enum DecodeWindow {
+    /// Whisper's natural window; also the length of a language probe.
+    static let seconds = 30.0
+    /// Below this the window is not decoded at all. Whisper hallucinates on
+    /// silence — a quiet mic produces invented sentences, the same short
+    /// phrase every 30 s, or one word repeated dozens of times — and the mic
+    /// stream is silent whenever "Them" talk, so this is also most of its
+    /// decode time saved.
+    static let skipBelowSpeech = 0.5
+    /// From this much speech a window may vote on the language. On
+    /// silence/breath the detector leans "en" at 0.5–0.7, which was enough
+    /// to flip a Swedish meeting into a translated window. The gate is
+    /// acoustic on purpose: gating on the decoded word count fails when the
+    /// current language is the wrong one (pinned to "en", Swedish decodes to
+    /// a few translated words, so the window never earned a vote).
+    static let minVoteSpeech = 2.5
+    /// One window this confident switches. Measured on compressed call
+    /// audio: correct-language readings are almost all ≥ 0.9, stray
+    /// readings almost all < 0.7.
+    static let switchNow: Float = 0.85
+    /// Two voting windows in a row at this switch.
+    static let switchSoon: Float = 0.7
+
+    struct State: Equatable, Sendable {
+        var language: String
+        /// A moderate reading of another language, awaiting confirmation.
+        var pending: String?
+        /// Pinned or single-candidate: never votes, never switches.
+        let fixed: Bool
+
+        init(language: String, pending: String? = nil, fixed: Bool = false) {
+            self.language = language
+            self.pending = pending
+            self.fixed = fixed
+        }
+    }
+
+    enum Plan: Equatable, Sendable {
+        case skip
+        case decode(vote: Bool)
+    }
+
+    enum Outcome: Equatable, Sendable {
+        case stay
+        case pending(String)
+        case switched(from: String, to: String)
+    }
+
+    /// Decode this window? And does it vote on the language?
+    static func plan(speechSeconds: Double, state: State) -> Plan {
+        guard speechSeconds >= skipBelowSpeech else { return .skip }
+        return .decode(vote: !state.fixed && speechSeconds >= minVoteSpeech)
+    }
+
+    /// Applies one voting window's detection (the best candidate and its
+    /// probability; nil when no candidate has any mass). Any vote that does
+    /// not confirm the pending language clears it; windows that do not
+    /// vote never reach here, so they leave it as it was.
+    static func apply(detectedLanguage: String?, probability: Float, to state: State) -> (State, Outcome) {
+        guard !state.fixed else { return (state, .stay) }
+        var next = state
+        guard let detected = detectedLanguage, probability > 0, detected != state.language else {
+            next.pending = nil
+            return (next, .stay)
+        }
+        if probability >= switchNow || (state.pending == detected && probability >= switchSoon) {
+            next.language = detected
+            next.pending = nil
+            return (next, .switched(from: state.language, to: detected))
+        }
+        if probability >= switchSoon {
+            next.pending = detected
+            return (next, .pending(detected))
+        }
+        next.pending = nil
+        return (next, .stay)
     }
 }

@@ -658,21 +658,11 @@ if CommandLine.arguments.contains("--memo-window") {
 // lines Whisper has produced on silence or shouting, and over lines that
 // must survive, and exits non-zero if any lands on the wrong side.
 if CommandLine.arguments.contains("--cleanup-test") {
-    // Every name below is a synthetic fixture.
-    let mustDrop = [
-        "Subtitles by the Amara.org community", "Subtitled by Jane Doe", "Captioning by CaptionMax",
-        "Transcribed by ESO, translated by —", "Undertexter av Lisa Larsson", "Översättning: Kalle Anka",
-        "Textning: Anna Svensson", "Svensktextning.nu", "www.zeoranger.co.uk", "[BLANK_AUDIO]",
-        "(upbeat music)", "[Music]", "Thank you.", "Tack för att du tittade.", "Sync and corrections by n17t01",
-        "Subtitles: Jonas Larsen", "Captions by VITAC",
-    ]
-    let mustKeep = [
-        "We translated the whole document by Friday and sent it to the client.", "The subtitles on that film were terrible.",
-        "I'll send you the link to amara.org later so you can see how the community works there.",
-        "Thank you so much for taking the time today, Sam, I really appreciate it.",
-        "Tack så mycket för att ni kunde komma idag, vi börjar med en kort runda.",
-        "(We should probably move on to the next question, don't you think?)",
-    ]
+    // The lines live in TranscriptBuilderFixtures, shared with the
+    // swift-testing suite.
+    let mustDrop = TranscriptBuilderFixtures.mustDrop
+    let mustKeep = TranscriptBuilderFixtures.mustKeep
+    let cleaned = TranscriptBuilderFixtures.cleaned
     var failed = false
     for line in mustDrop where !TranscriptBuilder.isKnownHallucination(line) {
         print("KEPT  (should drop): \(line)"); failed = true
@@ -680,21 +670,9 @@ if CommandLine.arguments.contains("--cleanup-test") {
     for line in mustKeep where TranscriptBuilder.isKnownHallucination(line) {
         print("DROPPED (should keep): \(line)"); failed = true
     }
-    let cleaned: [(String, String, String)] = [
-        ("SPEAKER 1: So what I wanted to ask you about", "en", "So what I wanted to ask you about"),
-        ("Talare 2: Vi börjar med det.", "sv", "Vi börjar med det."),
-        ("- Speaker: fine", "en", "fine"),
-        ("Speakers: Anna", "en", "Speakers: Anna"),
-        ("The speaker said: yes", "en", "The speaker said: yes"),
-        ("I THINK WE SHOULD GO WITH THE SECOND OPTION. IT'S CHEAPER AND I LIKE IT!", "en", "I think we should go with the second option. It's cheaper and I like it!"),
-        ("VI KAN TA DET PÅ MÅNDAG. DET FUNKAR BRA.", "sv", "Vi kan ta det på måndag. Det funkar bra."),
-        ("NASA and the EU agreed.", "en", "NASA and the EU agreed."),
-        ("OK OK OK", "en", "OK OK OK"),
-        ("<|en|><|0.00|> Hello there.<|2.00|>", "en", "Hello there."),
-    ]
-    for (input, lang, expected) in cleaned {
-        let got = TranscriptBuilder.cleanText(input, language: lang)
-        if got != expected { print("CLEAN mismatch: \(input) → \(got) (expected \(expected))"); failed = true }
+    for item in cleaned {
+        let got = TranscriptBuilder.cleanText(item.input, language: item.language)
+        if got != item.expected { print("CLEAN mismatch: \(item.input) → \(got) (expected \(item.expected))"); failed = true }
     }
     print(failed ? "cleanup-test FAILED" : "cleanup-test OK (\(mustDrop.count) dropped, \(mustKeep.count) kept, \(cleaned.count) cleaned)")
     exit(failed ? 1 : 0)

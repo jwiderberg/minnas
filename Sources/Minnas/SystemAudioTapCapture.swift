@@ -76,8 +76,10 @@
 // scan below compare for equality, never by prefix.
 //
 // Permission: there is no API to ask whether "System Audio Recording" is
-// granted, and without it the tap silently delivers zeros. 15 s of pure
-// digital zeros while buffers keep arriving (≥ 1/s) sets permissionSuspect.
+// granted, and without it the tap silently delivers zeros. 10 s of pure
+// digital zeros while buffers keep arriving (≥ 1/s) sets permissionSuspect
+// (10, not 15: AppDelegate's silence pre-flight runs 15 s after start and
+// reads the flag, so the flag has to be set before then).
 // It cannot tell "denied" from "nothing is playing" (a tap of an idle Mac
 // is also exact zeros) — it is a hint for the UI, never a reason to stop.
 //
@@ -241,7 +243,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
 
     static let fileRate: Double = 48000
     static let maxFillSeconds: Double = 300
-    static let suspectAfterSeconds: Double = 15
+    static let suspectAfterSeconds: Double = 10
     /// Aggregate-device UIDs start with this, so the leak check can find ours.
     static let aggregateUIDPrefix = "com.jwiderberg.minnas.tap."
 
