@@ -21,7 +21,9 @@
 // not running / not delivering buffers, the tap is torn down and
 // re-attached. The gap is padded with silence so the mic track stays
 // time-aligned with the system track, and the AEC decision is re-made
-// for the new route (headphones in → no bleed → AEC off).
+// for the new route (headphones in → no bleed → AEC off). The stall
+// threshold and the restart batch size come from RestartBackoff
+// (CaptureSupport.swift), shared with the system-audio engines.
 //
 // Threading: AVAudioEngine taps run on the AVAudio thread. start()/stop()
 // and the restart path run on the main actor. `file` is written from the
@@ -78,10 +80,10 @@ final class MicCapture: @unchecked Sendable {
     private let stats = TapStats()
     private var configObserver: NSObjectProtocol?
     private var restartTask: Task<Void, Never>?
-    private var attachedAt = Date.distantPast
-    // Restarts that came up but never delivered a buffer. Backs the stall
-    // threshold off so a dead device doesn't spin the restart loop.
-    private var silentRestarts = 0
+    // attachedAt, silentRestarts (restarts that came up but never delivered
+    // a buffer; backs the stall threshold off so a dead device doesn't spin
+    // the restart loop) and stalledSince. Main actor only.
+    private var backoff = RestartBackoff()
     private var sleepObservers: [NSObjectProtocol] = []
     // Set between willSleep and didWake. A restart that runs in that window
     // (the engine's config-change can land before didWake) must not pad.
@@ -94,7 +96,7 @@ final class MicCapture: @unchecked Sendable {
 
     /// When the mic stopped delivering audio and a restart is in progress
     /// or has failed; nil while healthy. The menubar shows a warning off it.
-    private(set) var stalledSince: Date?
+    var stalledSince: Date? { backoff.stalledSince }
 
     init(outputURL: URL) {
         self.outputURL = outputURL
@@ -115,10 +117,10 @@ final class MicCapture: @unchecked Sendable {
     var hasSignal: Bool { stats.nonSilentFrames > 0 }
 
     /// Wall-clock of the most recent non-silent buffer (auto-stop).
-    var lastSignalAt: Date? { Self.date(fromBits: stats.lastSignalBits.load(ordering: .relaxed)) }
+    var lastSignalAt: Date? { Date(epochBits: stats.lastSignalBits.load(ordering: .relaxed)) }
 
     /// Wall-clock of the most recent buffer of any kind.
-    var lastBufferAt: Date? { Self.date(fromBits: stats.lastBufferBits.load(ordering: .relaxed)) }
+    var lastBufferAt: Date? { Date(epochBits: stats.lastBufferBits.load(ordering: .relaxed)) }
 
     /// How many times the engine was re-attached after a route change or
     /// stall during this recording.
@@ -129,10 +131,6 @@ final class MicCapture: @unchecked Sendable {
     var secondsCaptured: Double {
         guard let rate = file?.processingFormat.sampleRate, rate > 0 else { return 0 }
         return Double(stats.frameCount) / rate
-    }
-
-    private static func date(fromBits bits: UInt64) -> Date? {
-        bits == 0 ? nil : Date(timeIntervalSince1970: Double(bitPattern: bits))
     }
 
     @MainActor
@@ -185,7 +183,7 @@ final class MicCapture: @unchecked Sendable {
         guard running else { return }
         let slept = sleepingSince.map { Date().timeIntervalSince($0) }
         sleepingSince = nil
-        stats.lastBufferBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+        stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
         micLog.notice("system woke after \(slept.map { String(format: "%.0f", $0) } ?? "unknown", privacy: .public) s asleep; mic stall clock reset, sleep not padded (mic/system tracks may be offset by up to that if the engine died over the sleep)")
     }
 
@@ -199,11 +197,9 @@ final class MicCapture: @unchecked Sendable {
             scheduleRestart(reason: "engine not running")
             return
         }
-        let last = lastBufferAt.map { max($0, attachedAt) } ?? attachedAt
         // 3 s normally; doubles for each restart that never produced a
         // buffer, up to a minute, so a dead device is retried, not spun on.
-        let threshold = min(60.0, 3.0 * pow(2.0, Double(silentRestarts)))
-        if Date().timeIntervalSince(last) > threshold {
+        if let threshold = backoff.overdue(lastBufferAt: lastBufferAt) {
             scheduleRestart(reason: "no buffers for \(Int(threshold)) s")
         }
     }
@@ -211,22 +207,20 @@ final class MicCapture: @unchecked Sendable {
     @MainActor
     private func scheduleRestart(reason: String) {
         guard running, restartTask == nil else { return }
-        if stalledSince == nil { stalledSince = Date() }
-        let deliveredSinceAttach = (lastBufferAt ?? .distantPast) > attachedAt
-        if stats.restarts > 0, !deliveredSinceAttach { silentRestarts += 1 } else { silentRestarts = 0 }
+        backoff.noteRestartScheduled(restartsSoFar: stats.restarts, lastBufferAt: lastBufferAt)
         micLog.error("mic stalled (\(reason, privacy: .public)); restarting")
         restartTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.restartTask = nil }
-            for attempt in 1...20 {
+            for attempt in 1...RestartBackoff.attemptsPerBatch {
                 guard self.running else { return }
                 do {
                     try self.reattach(reason: reason, attempt: attempt)
-                    self.stalledSince = nil
+                    self.backoff.noteRecovered()
                     return
                 } catch {
                     micLog.error("mic restart attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: RestartBackoff.retryDelay)
                 }
             }
             // Not terminal, on purpose, unlike both system engines (which
@@ -271,7 +265,7 @@ final class MicCapture: @unchecked Sendable {
             // Restart fired between willSleep and didWake: the gap is mostly
             // sleep. Don't pad; restart the stall clock from here.
             micLog.notice("mic restart during sleep/wake (asleep since \(sleepingSince.formatted(.iso8601), privacy: .public)); gap of \(String(format: "%.1f", Date().timeIntervalSince(last)), privacy: .public) s not padded")
-            stats.lastBufferBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+            stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
             return
         }
         let rawGap = Date().timeIntervalSince(last)
@@ -297,7 +291,7 @@ final class MicCapture: @unchecked Sendable {
         stats.paddedSeconds += gap
         // The padding stands in for the dead stretch; the stall clock
         // restarts from here.
-        stats.lastBufferBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+        stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
         micLog.notice("padded mic track with \(String(format: "%.1f", gap), privacy: .public) s of silence across the restart")
     }
 
@@ -421,7 +415,7 @@ final class MicCapture: @unchecked Sendable {
             input.removeTap(onBus: 0)
             throw MicCaptureError.engineStartFailed(underlying: error)
         }
-        attachedAt = Date()
+        backoff.noteAttached()
     }
 
     /// The per-buffer tap. nonisolated so the closure carries no actor
@@ -440,19 +434,19 @@ final class MicCapture: @unchecked Sendable {
                     var nonSilent: UInt64 = 0
                     for i in 0..<count {
                         let v = abs(channelData[i])
-                        if v > 0.0001 { nonSilent += 1 }
+                        if v > CaptureSignal.epsilon { nonSilent += 1 }
                         if v > localPeak { localPeak = v }
                     }
                     stats.frameCount &+= UInt64(buffer.frameLength)
                     stats.nonSilentFrames &+= nonSilent
                     if localPeak > stats.peakAmplitude { stats.peakAmplitude = localPeak }
                     if nonSilent > 0 {
-                        stats.lastSignalBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+                        stats.lastSignalBits.store(Date().epochBits, ordering: .relaxed)
                     }
                 } else {
                     stats.frameCount &+= UInt64(buffer.frameLength)
                 }
-                stats.lastBufferBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+                stats.lastBufferBits.store(Date().epochBits, ordering: .relaxed)
                 do {
                     var toWrite = buffer
                     if needsMonoCopy {

@@ -10,12 +10,13 @@
 //     processes natively.
 //
 // Both write the same CAF format (48 kHz stereo 16-bit interleaved PCM),
-// keep the file aligned with wall clock across restarts by padding gaps
+// keep the file aligned with host time across restarts by padding gaps
 // with silence, and expose the same health counters, so transcription,
 // AudioDuplication and capture_health don't care which one recorded.
 //
 
 import Foundation
+import Synchronization
 
 /// The `systemAudioEngine` setting (SYSTEM_AUDIO_ENGINE).
 enum SystemAudioEngineKind: String, Sendable, CaseIterable {
@@ -74,4 +75,12 @@ enum SystemAudioEngines {
         case .taps: return SystemAudioTapCapture(outputURL: outputURL)
         }
     }
+}
+
+/// One-shot latch for a finish-versus-deadline race (both engines' stop()
+/// and PaddedCAFWriter.finish): the first claim() wins and resumes the
+/// continuation, the other side does nothing.
+final class FinishLatch: Sendable {
+    private let claimed = Atomic<Bool>(false)
+    func claim() -> Bool { !claimed.exchange(true, ordering: .acquiringAndReleasing) }
 }

@@ -48,7 +48,8 @@
 // The file's own timeline is a sample counter; whenever the next buffer's
 // host time is ahead of it (a restart, a ring overflow, a dropped append)
 // the gap is padded with zeros (≤ 300 s, finite, 2 s writer deadline —
-// ported from SystemAudioCapture), so the track stays aligned with the mic.
+// PaddedCAFWriter, shared with SystemAudioCapture), so the track stays
+// aligned with the mic.
 //
 // Liveness, as SystemAudioCapture: no buffer for 3 s → restart (backing off
 // for restarts that never deliver); a restart rebuilds tap + aggregate on
@@ -108,18 +109,12 @@ enum SystemAudioTapError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .noDefaultOutputDevice: return "no default output device"
-        case .coreAudio(let step, let status): return "\(step) failed (OSStatus \(status) '\(fourCC(status))')"
+        case .coreAudio(let step, let status): return "\(step) failed (OSStatus \(status) '\(CoreAudioHAL.fourCC(status))')"
         case .writerInitFailed(let underlying): return "asset writer init failed: \(underlying)"
         case .teardownIncomplete: return "previous tap/aggregate not released; refusing to build on top of it"
         case .testInjectedRestartFailure: return "rebuild failed on purpose (TAP_TEST_FAIL_RESTARTS=1)"
         }
     }
-}
-
-private func fourCC(_ status: OSStatus) -> String {
-    let n = UInt32(bitPattern: status)
-    let bytes = [UInt8((n >> 24) & 0xff), UInt8((n >> 16) & 0xff), UInt8((n >> 8) & 0xff), UInt8(n & 0xff)]
-    return bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) ? String(decoding: bytes, as: UTF8.self) : String(status)
 }
 
 /// Lock-free SPSC ring of fixed-size slots between the IOProc (producer)
@@ -195,11 +190,10 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     /// Terminal: 20 rebuild attempts failed. Set before onUnexpectedStop so
     /// neither checkHealth nor a device switch starts another batch.
     private var gaveUp = false
-    private var attachedAt = Date.distantPast
-    private var silentRestarts = 0
+    private var backoff = RestartBackoff()
     private var deviceListener: AudioObjectPropertyListenerBlock?
     private(set) var restartCount = 0
-    private(set) var stalledSince: Date?
+    var stalledSince: Date? { backoff.stalledSince }
 
     // MARK: controlQueue state (Core Audio objects)
     private let controlQueue = DispatchQueue(label: "minnas.system-tap.control")
@@ -209,13 +203,11 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
 
     // MARK: writeQueue state (writer, timeline, analysis)
-    private let writeQueue = DispatchQueue(label: "minnas.system-tap.write")
-    private var writer: AVAssetWriter?
-    private var audioInput: AVAssetWriterInput?
+    private let writeQueue: DispatchQueue
+    /// The file, confined to writeQueue. Its timeline end is at 48 kHz, in
+    /// the host-time domain.
+    private let caf: PaddedCAFWriter
     private var drainTimer: DispatchSourceTimer?
-    private var sessionStarted = false
-    /// End of the file's timeline, at 48 kHz, in the host-time domain.
-    private var cursor = CMTime.invalid
     private var padPending = false
     private var seenOverflows: UInt64 = 0
     private var converter: AVAudioConverter?
@@ -228,33 +220,23 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     private let peakBits = Atomic<UInt32>(0)
     private let signalLatch = Atomic<Bool>(false)
     private let lastSignalBits = Atomic<UInt64>(0)
-    private let writerDrops = Atomic<UInt64>(0)
-    private let writerFailed = Atomic<Bool>(false)
-    /// stop()'s finishWriting missed its deadline; the writer was abandoned.
-    private let writerTimedOut = Atomic<Bool>(false)
+    /// Writer drops, failure, padding and timeout; outlives the writer.
+    private let cafStats = CAFWriterStats()
     /// Outer bound on stop()'s hop onto writeQueue: longer than the 10 s
     /// finishWriting wait inside finishOnWriteQueue so that wait normally
     /// wins; this one only fires when the queue itself is stuck.
     static let stopDeadline: Double = 15
-    private let paddedBits = Atomic<UInt64>(0)
     private let suspect = Atomic<Bool>(false)
 
     var onUnexpectedStop: (@Sendable () -> Void)?
 
     static let fileRate: Double = 48000
-    static let maxFillSeconds: Double = 300
     static let suspectAfterSeconds: Double = 10
     /// Aggregate-device UIDs start with this, so the leak check can find ours.
     static let aggregateUIDPrefix = "com.jwiderberg.minnas.tap."
 
-    private static let ticksPerSecond: Double = {
-        var tb = mach_timebase_info_data_t()
-        mach_timebase_info(&tb)
-        return 1e9 * Double(tb.denom) / Double(tb.numer)
-    }()
-
     /// nil only if CoreMedia refuses the description (out of memory);
-    /// setUpWriter turns that into a start() error, sampleBuffer into a drop.
+    /// setUpWriter turns that into a start() error.
     private static let fileFormat: CMAudioFormatDescription? = {
         var asbd = AudioStreamBasicDescription(
             mSampleRate: fileRate, mFormatID: kAudioFormatLinearPCM,
@@ -281,6 +263,9 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
 
     init(outputURL: URL) {
         self.outputURL = outputURL
+        let writeQueue = DispatchQueue(label: "minnas.system-tap.write")
+        self.writeQueue = writeQueue
+        self.caf = PaddedCAFWriter(queue: writeQueue, stats: cafStats, log: tapLog)
         self.testFailRestarts = ProcessInfo.processInfo.environment["TAP_TEST_FAIL_RESTARTS"] == "1"
         if testFailRestarts {
             tapLog.error("TAP_TEST_FAIL_RESTARTS=1: every tap rebuild will fail (test hook)")
@@ -290,20 +275,17 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     // MARK: SystemAudioEngine
 
     var hasSignal: Bool { signalLatch.load(ordering: .relaxed) }
-    var lastSignalAt: Date? {
-        let bits = lastSignalBits.load(ordering: .relaxed)
-        return bits == 0 ? nil : Date(timeIntervalSince1970: Double(bitPattern: bits))
-    }
+    var lastSignalAt: Date? { Date(epochBits: lastSignalBits.load(ordering: .relaxed)) }
     var lastBufferAt: Date? {
         let ticks = ring.lastCycleTicks.load(ordering: .relaxed)
         guard ticks != 0 else { return nil }
-        let ago = Double(mach_absolute_time() &- ticks) / Self.ticksPerSecond
+        let ago = Double(mach_absolute_time() &- ticks) / HostClock.ticksPerSecond
         return Date().addingTimeInterval(-max(0, ago))
     }
     var buffersDelivered: UInt64 { ring.cycles.load(ordering: .relaxed) }
-    var buffersDropped: UInt64 { writerDrops.load(ordering: .relaxed) &+ ring.overflows.load(ordering: .relaxed) }
-    var paddedSecondsTotal: Double { Double(bitPattern: paddedBits.load(ordering: .relaxed)) }
-    var hasWriterFailed: Bool { writerFailed.load(ordering: .relaxed) }
+    var buffersDropped: UInt64 { cafStats.dropped &+ ring.overflows.load(ordering: .relaxed) }
+    var paddedSecondsTotal: Double { cafStats.paddedSeconds }
+    var hasWriterFailed: Bool { cafStats.hasFailed }
     var permissionSuspect: Bool { suspect.load(ordering: .relaxed) }
 
     func snapshotPeak() -> Float {
@@ -315,11 +297,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         do {
             try await onControlThrowing { try self.build() }
         } catch {
-            await onWrite {
-                self.writer?.cancelWriting()
-                self.writer = nil
-                self.audioInput = nil
-            }
+            await onWrite { self.caf.cancelBeforeFirstAppend() }
             throw error
         }
         await onWrite { self.startDrainTimer() }
@@ -329,16 +307,14 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     @MainActor
     private func startOnMain() {
         running = true
-        attachedAt = Date()
+        backoff.noteAttached()
         installDeviceListener()
     }
 
     @MainActor
     func checkHealth() {
         guard running, !gaveUp, !stoppingByRequest, restartTask == nil else { return }
-        let last = lastBufferAt.map { max($0, attachedAt) } ?? attachedAt
-        let threshold = min(60.0, 3.0 * pow(2.0, Double(silentRestarts)))
-        if Date().timeIntervalSince(last) > threshold {
+        if let threshold = backoff.overdue(lastBufferAt: lastBufferAt) {
             scheduleRestart(reason: "no buffers for \(Int(threshold)) s")
         }
     }
@@ -387,10 +363,10 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             }
         }
         if !finishedInTime {
-            writerTimedOut.store(true, ordering: .relaxed)
+            cafStats.markTimedOut()
             tapLog.error("stop: the finish did not complete within \(Int(Self.stopDeadline), privacy: .public) s of being queued (the write queue was stuck, or the writer wait above also timed out); abandoning the writer")
         }
-        tapLog.notice("stop: cycles=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(self.writerTimedOut.load(ordering: .relaxed), privacy: .public) permissionSuspect=\(self.permissionSuspect, privacy: .public)")
+        tapLog.notice("stop: cycles=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(self.cafStats.hasTimedOut, privacy: .public) permissionSuspect=\(self.permissionSuspect, privacy: .public)")
     }
 
     // MARK: Restart
@@ -402,15 +378,13 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             if deviceChange { deviceChangedDuringRestart = true }
             return
         }
-        if stalledSince == nil { stalledSince = Date() }
-        let deliveredSinceAttach = (lastBufferAt ?? .distantPast) > attachedAt
-        if restartCount > 0, !deliveredSinceAttach { silentRestarts += 1 } else { silentRestarts = 0 }
+        backoff.noteRestartScheduled(restartsSoFar: restartCount, lastBufferAt: lastBufferAt)
         tapLog.error("system audio tap restarting (\(reason, privacy: .public))")
         restartTask = Task { @MainActor [weak self] in
             guard let self else { return }
             if settle > .zero { try? await Task.sleep(for: settle) }
             var succeeded = false
-            for attempt in 1...20 {
+            for attempt in 1...RestartBackoff.attemptsPerBatch {
                 guard self.running, !self.stoppingByRequest, !Task.isCancelled else { break }
                 self.deviceChangedDuringRestart = false
                 do {
@@ -424,15 +398,15 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                         try self.build()
                     }
                     guard !self.stoppingByRequest, !Task.isCancelled else { break }  // stop() tears down
-                    self.attachedAt = Date()
+                    self.backoff.noteAttached()
                     self.restartCount += 1
-                    self.stalledSince = nil
+                    self.backoff.noteRecovered()
                     tapLog.notice("system audio tap rebuilt (\(reason, privacy: .public), attempt \(attempt, privacy: .public))")
                     succeeded = true
                     break
                 } catch {
                     tapLog.error("system audio tap rebuild attempt \(attempt, privacy: .public) failed: \(String(describing: error), privacy: .public)")
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: RestartBackoff.retryDelay)
                 }
             }
             self.restartTask = nil
@@ -467,7 +441,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
 
     @MainActor
     private func installDeviceListener() {
-        var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
+        var address = CoreAudioHAL.address(kAudioHardwarePropertyDefaultOutputDevice)
         let block = Self.makeDeviceListener(owner: self)
         let status = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
         if status == noErr {
@@ -480,7 +454,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     @MainActor
     private func removeDeviceListener() {
         guard let block = deviceListener else { return }
-        var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
+        var address = CoreAudioHAL.address(kAudioHardwarePropertyDefaultOutputDevice)
         AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, listenerQueue, block)
         deviceListener = nil
     }
@@ -533,10 +507,10 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         }
         let excluded = Self.excludedProcessObjects()
 
-        let outputID: AudioObjectID = try Self.get(AudioObjectID(kAudioObjectSystemObject),
-                                                   kAudioHardwarePropertyDefaultOutputDevice, step: "read default output device")
+        let outputID: AudioObjectID = try CoreAudioHAL.get(AudioObjectID(kAudioObjectSystemObject),
+                                                           kAudioHardwarePropertyDefaultOutputDevice, step: "read default output device")
         guard outputID != kAudioObjectUnknown else { throw SystemAudioTapError.noDefaultOutputDevice }
-        let outputUID = try Self.getString(outputID, kAudioDevicePropertyDeviceUID, step: "read output device UID")
+        let outputUID = try CoreAudioHAL.getString(outputID, kAudioDevicePropertyDeviceUID, step: "read output device UID")
 
         let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded.objects)
         description.name = "Minnas system audio"
@@ -544,11 +518,11 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         description.isPrivate = true          // visible to this process only
         description.muteBehavior = .unmuted   // the user keeps hearing everything
         var newTap = AudioObjectID(kAudioObjectUnknown)
-        try Self.check(AudioHardwareCreateProcessTap(description, &newTap), "AudioHardwareCreateProcessTap")
+        try CoreAudioHAL.check(AudioHardwareCreateProcessTap(description, &newTap), "AudioHardwareCreateProcessTap")
         tapID = newTap
 
         do {
-            let tapFormat: AudioStreamBasicDescription = try Self.get(newTap, kAudioTapPropertyFormat, step: "read tap format")
+            let tapFormat: AudioStreamBasicDescription = try CoreAudioHAL.get(newTap, kAudioTapPropertyFormat, step: "read tap format")
 
             let aggregateUID = Self.aggregateUIDPrefix + UUID().uuidString
             let composition: [String: Any] = [
@@ -573,16 +547,16 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                 ]],
             ]
             var newAggregate = AudioObjectID(kAudioObjectUnknown)
-            try Self.check(AudioHardwareCreateAggregateDevice(composition as CFDictionary, &newAggregate),
-                           "AudioHardwareCreateAggregateDevice")
+            try CoreAudioHAL.check(AudioHardwareCreateAggregateDevice(composition as CFDictionary, &newAggregate),
+                                   "AudioHardwareCreateAggregateDevice")
             aggregateID = newAggregate
 
             // The tap's stream comes after the sub-device's own input
             // streams (a USB headset or a virtual audio device has some; speakers don't).
-            let inputStreams = try Self.getArray(newAggregate, kAudioDevicePropertyStreams, AudioObjectID.self,
-                                                 scope: kAudioObjectPropertyScopeInput, step: "read aggregate input streams")
-            let outputStreams = (try? Self.getArray(newAggregate, kAudioDevicePropertyStreams, AudioObjectID.self,
-                                                    scope: kAudioObjectPropertyScopeOutput, step: "read aggregate output streams")) ?? []
+            let inputStreams = try CoreAudioHAL.getArray(newAggregate, kAudioDevicePropertyStreams, AudioObjectID.self,
+                                                         scope: kAudioObjectPropertyScopeInput, step: "read aggregate input streams")
+            let outputStreams = (try? CoreAudioHAL.getArray(newAggregate, kAudioDevicePropertyStreams, AudioObjectID.self,
+                                                            scope: kAudioObjectPropertyScopeOutput, step: "read aggregate output streams")) ?? []
             guard let tapStream = inputStreams.last else {
                 throw SystemAudioTapError.coreAudio(step: "aggregate has no input stream for the tap", status: -1)
             }
@@ -593,17 +567,17 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             let streamFormat: AudioStreamBasicDescription
             let formatSource: String
             do {
-                streamFormat = try Self.get(tapStream, kAudioStreamPropertyVirtualFormat, step: "read tap stream virtual format")
+                streamFormat = try CoreAudioHAL.get(tapStream, kAudioStreamPropertyVirtualFormat, step: "read tap stream virtual format")
                 formatSource = "stream"
             } catch {
-                tapLog.error("tap stream format unreadable (\(String(describing: error), privacy: .public)); using the tap's own format \(Self.describe(tapFormat), privacy: .public)")
+                tapLog.error("tap stream format unreadable (\(String(describing: error), privacy: .public)); using the tap's own format \(CoreAudioHAL.describe(tapFormat), privacy: .public)")
                 streamFormat = tapFormat
                 formatSource = "tap(fallback)"
             }
             if streamFormat.mSampleRate != tapFormat.mSampleRate
                 || streamFormat.mChannelsPerFrame != tapFormat.mChannelsPerFrame
                 || streamFormat.mFormatFlags != tapFormat.mFormatFlags {
-                tapLog.notice("tap stream format \(Self.describe(streamFormat), privacy: .public) differs from tap format \(Self.describe(tapFormat), privacy: .public); using the stream's")
+                tapLog.notice("tap stream format \(CoreAudioHAL.describe(streamFormat), privacy: .public) differs from tap format \(CoreAudioHAL.describe(tapFormat), privacy: .public); using the stream's")
             }
             // The IOProc reads Float32 samples; anything else would be
             // copied as garbage.
@@ -611,7 +585,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                   streamFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0,
                   streamFormat.mBitsPerChannel == 32,
                   streamFormat.mSampleRate > 0, streamFormat.mSampleRate.isFinite else {
-                throw SystemAudioTapError.coreAudio(step: "tap stream format \(Self.describe(streamFormat)) is not Float32 PCM",
+                throw SystemAudioTapError.coreAudio(step: "tap stream format \(CoreAudioHAL.describe(streamFormat)) is not Float32 PCM",
                                                     status: -1)
             }
             let interleaved = (streamFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
@@ -621,9 +595,9 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                                    channels: channels, sampleRate: streamFormat.mSampleRate)
 
             var newProc: AudioDeviceIOProcID?
-            try Self.check(AudioDeviceCreateIOProcIDWithBlock(&newProc, newAggregate, nil,
-                                                              Self.makeIOBlock(ring: ring, layout: layout)),
-                           "AudioDeviceCreateIOProcIDWithBlock")
+            try CoreAudioHAL.check(AudioDeviceCreateIOProcIDWithBlock(&newProc, newAggregate, nil,
+                                                                      Self.makeIOBlock(ring: ring, layout: layout)),
+                                   "AudioDeviceCreateIOProcIDWithBlock")
             guard let proc = newProc else {
                 throw SystemAudioTapError.coreAudio(step: "AudioDeviceCreateIOProcIDWithBlock returned no IOProc id", status: -1)
             }
@@ -631,9 +605,9 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             let usageOK = try Self.restrictStreamUsage(device: newAggregate, proc: proc, inputCount: inputStreams.count,
                                                        tapRange: layout.bufferIndex..<(layout.bufferIndex + tapBuffers),
                                                        outputCount: outputStreams.count)
-            try Self.check(AudioDeviceStart(newAggregate, proc), "AudioDeviceStart")
+            try CoreAudioHAL.check(AudioDeviceStart(newAggregate, proc), "AudioDeviceStart")
 
-            tapLog.notice("tap capture up: output=\(outputUID, privacy: .public) format(\(formatSource, privacy: .public))=\(Self.describe(streamFormat), privacy: .public) tapFormat=\(Self.describe(tapFormat), privacy: .public) aggregateInputStreams=\(inputStreams.count, privacy: .public) outputStreams=\(outputStreams.count, privacy: .public) tapBuffer=\(layout.bufferIndex, privacy: .public) streamUsageRestricted=\(usageOK, privacy: .public) excluded=\(excluded.summary, privacy: .public)")
+            tapLog.notice("tap capture up: output=\(outputUID, privacy: .public) format(\(formatSource, privacy: .public))=\(CoreAudioHAL.describe(streamFormat), privacy: .public) tapFormat=\(CoreAudioHAL.describe(tapFormat), privacy: .public) aggregateInputStreams=\(inputStreams.count, privacy: .public) outputStreams=\(outputStreams.count, privacy: .public) tapBuffer=\(layout.bufferIndex, privacy: .public) streamUsageRestricted=\(usageOK, privacy: .public) excluded=\(excluded.summary, privacy: .public)")
         } catch {
             teardown()
             throw error
@@ -651,13 +625,13 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             if stopStatus != noErr {
                 // Not a handle; the destroy below still runs (it is what
                 // releases the IOProc).
-                tapLog.error("teardown: AudioDeviceStop status \(stopStatus, privacy: .public) '\(fourCC(stopStatus), privacy: .public)'")
+                tapLog.error("teardown: AudioDeviceStop status \(stopStatus, privacy: .public) '\(CoreAudioHAL.fourCC(stopStatus), privacy: .public)'")
             }
             let status = AudioDeviceDestroyIOProcID(aggregateID, proc)
             if status == noErr {
                 ioProcID = nil
             } else {
-                tapLog.error("teardown: AudioDeviceDestroyIOProcID status \(status, privacy: .public) '\(fourCC(status), privacy: .public)'; keeping the IOProc id to retry")
+                tapLog.error("teardown: AudioDeviceDestroyIOProcID status \(status, privacy: .public) '\(CoreAudioHAL.fourCC(status), privacy: .public)'; keeping the IOProc id to retry")
             }
         }
         if aggregateID != kAudioObjectUnknown {
@@ -667,7 +641,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                 // The IOProc belonged to the aggregate and is gone with it.
                 ioProcID = nil
             } else {
-                tapLog.error("teardown: AudioHardwareDestroyAggregateDevice status \(status, privacy: .public) '\(fourCC(status), privacy: .public)'; keeping aggregate \(self.aggregateID, privacy: .public) to retry")
+                tapLog.error("teardown: AudioHardwareDestroyAggregateDevice status \(status, privacy: .public) '\(CoreAudioHAL.fourCC(status), privacy: .public)'; keeping aggregate \(self.aggregateID, privacy: .public) to retry")
             }
         } else {
             // No aggregate means no IOProc can exist.
@@ -678,7 +652,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             if status == noErr {
                 tapID = AudioObjectID(kAudioObjectUnknown)
             } else {
-                tapLog.error("teardown: AudioHardwareDestroyProcessTap status \(status, privacy: .public) '\(fourCC(status), privacy: .public)'; keeping tap \(self.tapID, privacy: .public) to retry")
+                tapLog.error("teardown: AudioHardwareDestroyProcessTap status \(status, privacy: .public) '\(CoreAudioHAL.fourCC(status), privacy: .public)'; keeping tap \(self.tapID, privacy: .public) to retry")
             }
         }
         return tapID == kAudioObjectUnknown && aggregateID == kAudioObjectUnknown && ioProcID == nil
@@ -689,7 +663,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     private nonisolated static func makeIOBlock(ring: TapRing, layout: TapLayout) -> AudioDeviceIOBlock {
         let mask = TapRing.slotCount - 1
         let slotFrames = TapRing.slotFrames
-        let ticksPerFrame = ticksPerSecond / max(1, layout.sampleRate)
+        let ticksPerFrame = HostClock.ticksPerSecond / max(1, layout.sampleRate)
         return { _, inInputData, inInputTime, outOutputData, _ in
             let now = mach_absolute_time()
             ring.cycles.wrappingAdd(1, ordering: .relaxed)
@@ -754,44 +728,29 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
 
     // MARK: Writer (writeQueue only)
 
+    /// PaddedCAFWriter's open errors, as the NSError domain/codes this
+    /// engine has always reported (-1 start, -2 format, -3 canAdd).
     private func setUpWriter() throws {
-        let writer: AVAssetWriter
-        do {
-            writer = try AVAssetWriter(outputURL: outputURL, fileType: .caf)
-        } catch {
-            throw SystemAudioTapError.writerInitFailed(underlying: error)
-        }
-        // Identical to SystemAudioCapture's output settings.
-        let audioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 48000,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
         guard let fileFormat = Self.fileFormat else {
             throw SystemAudioTapError.writerInitFailed(
                 underlying: NSError(domain: "SystemAudioTapCapture", code: -2,
                                     userInfo: [NSLocalizedDescriptionKey: "could not create the 48 kHz Float32 format description"]))
         }
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings, sourceFormatHint: fileFormat)
-        input.expectsMediaDataInRealTime = true
-        // Without the input, startWriting would succeed and every append
-        // would fail — a recording of nothing that looks healthy at start.
-        guard writer.canAdd(input) else {
-            throw SystemAudioTapError.writerInitFailed(
-                underlying: NSError(domain: "SystemAudioTapCapture", code: -3,
-                                    userInfo: [NSLocalizedDescriptionKey: "asset writer refused the audio input (canAdd == false)"]))
+        do throws(PaddedCAFWriter.OpenError) {
+            try caf.open(url: outputURL, sourceFormatHint: fileFormat)
+        } catch {
+            switch error {
+            case .create(let underlying):
+                throw SystemAudioTapError.writerInitFailed(underlying: underlying)
+            case .inputRefused:
+                throw SystemAudioTapError.writerInitFailed(
+                    underlying: NSError(domain: "SystemAudioTapCapture", code: -3,
+                                        userInfo: [NSLocalizedDescriptionKey: "asset writer refused the audio input (canAdd == false)"]))
+            case .startFailed(let underlying):
+                throw SystemAudioTapError.writerInitFailed(
+                    underlying: underlying ?? NSError(domain: "SystemAudioTapCapture", code: -1))
+            }
         }
-        writer.add(input)
-        guard writer.startWriting() else {
-            throw SystemAudioTapError.writerInitFailed(
-                underlying: writer.error ?? NSError(domain: "SystemAudioTapCapture", code: -1))
-        }
-        self.writer = writer
-        self.audioInput = input
     }
 
     private func startDrainTimer() {
@@ -807,33 +766,10 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         drainTimer = nil
         drain()
         finished = true
-        guard let writer, let input = audioInput else { return }
-        input.markAsFinished()
-        let done = DispatchSemaphore(value: 0)
-        // The handler holds the writer until AVFoundation is done with it, so
-        // a finish that lands after the deadline still finalises the file.
-        nonisolated(unsafe) let keepAlive = writer
-        // Atomic is non-copyable, so the flag is read through a weak self:
-        // the handler must not keep the whole capture object (and its ring)
-        // alive if AVFoundation never calls back.
-        writer.finishWriting { [weak self] in
-            if self?.writerTimedOut.load(ordering: .relaxed) == true {
-                tapLog.notice("finishWriting completed after the deadline (writer status \(keepAlive.status.rawValue, privacy: .public))")
-            }
-            done.signal()
-        }
-        // Bounded: a wedged writer must not hang stop() forever. On timeout
-        // the writer is abandoned, NOT cancelled: per AVAssetWriter.h,
-        // -cancelWriting "will block until writing is canceled" and "If an
-        // output file was created by the receiver during the writing
-        // process, -cancelWriting will delete the file" — that would throw
-        // away the whole system track.
-        if done.wait(timeout: .now() + 10) == .timedOut {
-            writerTimedOut.store(true, ordering: .relaxed)
-            tapLog.error("finishWriting did not complete within 10 s (writer status \(writer.status.rawValue, privacy: .public)); abandoning the writer without cancelWriting, which would delete the file")
-        }
-        self.writer = nil
-        self.audioInput = nil
+        // Bounded: a wedged writer must not hang stop() forever; on timeout
+        // the writer is abandoned (never cancelled, which would delete the
+        // file) and cafStats records it.
+        _ = caf.finishBlocking(timeout: PaddedCAFWriter.finishTimeout)
     }
 
     /// Moves every filled slot from the ring into the file.
@@ -853,7 +789,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             let slot = t & mask
             let frames = ring.frameCounts[slot]
             let rate = ring.rates[slot]
-            let hostSeconds = Double(ring.hostTimes[slot]) / Self.ticksPerSecond
+            let hostSeconds = Double(ring.hostTimes[slot]) / HostClock.ticksPerSecond
             let samples = UnsafePointer(ring.samples + slot * TapRing.slotFrames * 2)
             analyze(samples, count: frames * 2, hostSeconds: hostSeconds)
             if rate == Self.fileRate {
@@ -878,9 +814,9 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         if peak > Float(bitPattern: peakBits.load(ordering: .relaxed)) {
             peakBits.store(peak.bitPattern, ordering: .relaxed)
         }
-        if peak > 0.0001 {
+        if peak > CaptureSignal.epsilon {
             signalLatch.store(true, ordering: .relaxed)
-            lastSignalBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+            lastSignalBits.store(Date().epochBits, ordering: .relaxed)
         }
         if anyNonZero {
             zeroRunStart = nil
@@ -939,106 +875,50 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
         append(UnsafeRawPointer(outData), frames: Int(outBuffer.frameLength), hostSeconds: hostSeconds)
     }
 
-    /// Appends 48 kHz interleaved stereo Float32 frames at the file cursor,
-    /// padding first when the buffer's host time is ahead of it.
+    /// Appends 48 kHz interleaved stereo Float32 frames at the file's
+    /// timeline end, padding first when the buffer's host time is ahead of it.
     private func append(_ data: UnsafeRawPointer, frames: Int, hostSeconds: Double) {
-        guard let writer, let input = audioInput, frames > 0 else { return }
-        if !sessionStarted {
-            cursor = CMTime(value: CMTimeValue((hostSeconds * Self.fileRate).rounded()), timescale: CMTimeScale(Self.fileRate))
-            writer.startSession(atSourceTime: cursor)
-            sessionStarted = true
+        guard caf.isOpen, frames > 0, let fileFormat = Self.fileFormat else { return }
+        if !caf.sessionStarted {
+            caf.startSession(atSourceTime: CMTime(value: CMTimeValue((hostSeconds * Self.fileRate).rounded()),
+                                                  timescale: CMTimeScale(Self.fileRate)),
+                             seedTimeline: true)
         } else {
-            let gap = hostSeconds - cursor.seconds
+            let gap = hostSeconds - caf.timelineEnd.seconds
             // 50 ms swallows host-time jitter and resampler latency; after a
             // known hole (drop/overflow) any measurable gap is real.
             if gap > 0.05 || (padPending && gap > 0.002) {
-                fillGap(seconds: gap, input: input, writer: writer)
+                fillGap(seconds: gap, format: fileFormat)
             }
         }
         padPending = false
 
-        guard let buffer = Self.sampleBuffer(data, frames: frames, pts: cursor) else { return }
         // Not the realtime thread, so a short wait is fine; past it the
         // buffer is dropped and the next one pads the hole.
-        let deadline = Date().addingTimeInterval(0.1)
-        var ready = input.isReadyForMoreMediaData
-        while !ready, writer.status == .writing, Date() < deadline {
-            usleep(2_000)
-            ready = input.isReadyForMoreMediaData
-        }
-        guard ready else {
-            let dropped = writerDrops.wrappingAdd(1, ordering: .relaxed).newValue
+        switch caf.appendFrames(data, frames: frames, format: fileFormat, readyWait: 0.1) {
+        case .appended, .writerFailed:
+            break
+        case .dropped(let dropped):
             if dropped == 1 || dropped.isMultiple(of: 100) {
                 tapLog.error("writer input not ready; dropped tap buffer (\(dropped, privacy: .public) so far)")
             }
             padPending = true
-            return
-        }
-        if !input.append(buffer), writer.status == .failed {
-            if !writerFailed.load(ordering: .relaxed) {
-                tapLog.error("asset writer failed: \(writer.error?.localizedDescription ?? "unknown", privacy: .public)")
-            }
-            writerFailed.store(true, ordering: .relaxed)
-            return
-        }
-        cursor = CMTimeAdd(cursor, CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(Self.fileRate)))
-    }
-
-    /// Zeros covering `seconds` from the cursor (the port of
-    /// SystemAudioCapture.fillGap): capped, finite, 2 s writer deadline.
-    private func fillGap(seconds gap: Double, input: AVAssetWriterInput, writer: AVAssetWriter) {
-        guard gap.isFinite, gap <= Self.maxFillSeconds else {
-            tapLog.error("system-audio tap gap \(String(format: "%.3f", gap), privacy: .public) s is non-finite or over the \(Int(Self.maxFillSeconds), privacy: .public) s cap; not padding it")
-            return
-        }
-        let rate = Self.fileRate
-        var remaining = Int(gap * rate)
-        var written = 0
-        while remaining > 0 {
-            let frames = min(remaining, Int(rate))
-            guard let silent = Self.sampleBuffer(nil, frames: frames, pts: cursor) else { break }
-            let deadline = Date().addingTimeInterval(2)
-            var ready = input.isReadyForMoreMediaData
-            while !ready, writer.status == .writing, Date() < deadline {
-                usleep(2_000)
-                ready = input.isReadyForMoreMediaData
-            }
-            guard ready else {
-                tapLog.error("gap fill gave up: writer input not ready after 2 s (writer status \(writer.status.rawValue, privacy: .public))")
-                break
-            }
-            guard input.append(silent) else { break }
-            written += frames
-            remaining -= frames
-            cursor = CMTimeAdd(cursor, CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(rate)))
-        }
-        let padded = Double(written) / rate
-        paddedBits.store((paddedSecondsTotal + padded).bitPattern, ordering: .relaxed)
-        if padded >= 0.25 {
-            tapLog.notice("padded system track with \(String(format: "%.2f", padded), privacy: .public) s of silence (gap \(String(format: "%.2f", gap), privacy: .public) s)")
         }
     }
 
-    /// A CMSampleBuffer in the fixed file format: a copy of `data`, or
-    /// zeros when `data` is nil.
-    private static func sampleBuffer(_ data: UnsafeRawPointer?, frames: Int, pts: CMTime) -> CMSampleBuffer? {
-        guard let fileFormat else { return nil }
-        let bytes = frames * 8
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: bytes,
-                                                 blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-                                                 dataLength: bytes, flags: kCMBlockBufferAssureMemoryNowFlag,
-                                                 blockBufferOut: &block) == kCMBlockBufferNoErr,
-              let block else { return nil }
-        let filled = data.map {
-            CMBlockBufferReplaceDataBytes(with: $0, blockBuffer: block, offsetIntoDestination: 0, dataLength: bytes)
-        } ?? CMBlockBufferFillDataBytes(with: 0, blockBuffer: block, offsetIntoDestination: 0, dataLength: bytes)
-        guard filled == kCMBlockBufferNoErr else { return nil }
-        var buffer: CMSampleBuffer?
-        let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: fileFormat,
-            sampleCount: frames, presentationTimeStamp: pts, packetDescriptions: nil, sampleBufferOut: &buffer)
-        return status == noErr ? buffer : nil
+    /// Zeros covering `gap` seconds from the timeline end (PaddedCAFWriter:
+    /// capped, finite, 2 s writer deadline).
+    private func fillGap(seconds gap: Double, format: CMAudioFormatDescription) {
+        switch caf.fillGap(seconds: gap, format: format) {
+        case .noTimeline, .belowMinimum:
+            break
+        case .rejected(let gap):
+            tapLog.error("system-audio tap gap \(String(format: "%.3f", gap), privacy: .public) s is non-finite or over the \(Int(PaddedCAFWriter.maxFillSeconds), privacy: .public) s cap; not padding it")
+        case .filled(let padded, let gap):
+            if padded >= 0.25 {
+                tapLog.notice("padded system track with \(String(format: "%.2f", padded), privacy: .public) s of silence (gap \(String(format: "%.2f", gap), privacy: .public) s)")
+            }
+        }
     }
 
     // MARK: Exclusions
@@ -1064,16 +944,16 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             var qualifier = pid
             var object = AudioObjectID(kAudioObjectUnknown)
             var size = UInt32(MemoryLayout<AudioObjectID>.size)
-            var address = address(kAudioHardwarePropertyTranslatePIDToProcessObject)
+            var address = CoreAudioHAL.address(kAudioHardwarePropertyTranslatePIDToProcessObject)
             let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
                                                     UInt32(MemoryLayout<pid_t>.size), &qualifier, &size, &object)
             if status == noErr, object != kAudioObjectUnknown { objects.insert(object) }
         }
         if !bundleIDs.isEmpty,
-           let all = try? getArray(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList,
-                                   AudioObjectID.self, step: "list process objects") {
+           let all = try? CoreAudioHAL.getArray(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList,
+                                                AudioObjectID.self, step: "list process objects") {
             for object in all where !objects.contains(object) {
-                if let bundle = try? getString(object, kAudioProcessPropertyBundleID, step: "process bundle id"),
+                if let bundle = try? CoreAudioHAL.getString(object, kAudioProcessPropertyBundleID, step: "process bundle id"),
                    bundleIDs.contains(bundle) {
                     objects.insert(object)
                     matched.append("\(bundle)[obj \(object)]")
@@ -1107,7 +987,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             raw.initializeMemory(as: UInt8.self, repeating: 0, count: byteCount)
             raw.storeBytes(of: unsafeBitCast(proc, to: UnsafeMutableRawPointer.self), as: UnsafeMutableRawPointer.self)
             raw.storeBytes(of: UInt32(count), toByteOffset: countOffset, as: UInt32.self)
-            var address = address(kAudioDevicePropertyIOProcStreamUsage, scope: scope)
+            var address = CoreAudioHAL.address(kAudioDevicePropertyIOProcStreamUsage, scope: scope)
             var size = UInt32(byteCount)
             guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, raw) == noErr else { return false }
             for i in 0..<count {
@@ -1126,61 +1006,9 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     /// from this process (private ones are invisible to everyone else).
     static func liveObjectCounts() -> (taps: Int, aggregates: Int) {
         let system = AudioObjectID(kAudioObjectSystemObject)
-        let taps = (try? getArray(system, kAudioHardwarePropertyTapList, AudioObjectID.self, step: "list taps"))?.count ?? -1
-        let devices = (try? getArray(system, kAudioHardwarePropertyDevices, AudioObjectID.self, step: "list devices")) ?? []
-        let ours = devices.filter { ((try? getString($0, kAudioDevicePropertyDeviceUID, step: "uid")) ?? "").hasPrefix(aggregateUIDPrefix) }
+        let taps = (try? CoreAudioHAL.getArray(system, kAudioHardwarePropertyTapList, AudioObjectID.self, step: "list taps"))?.count ?? -1
+        let devices = (try? CoreAudioHAL.getArray(system, kAudioHardwarePropertyDevices, AudioObjectID.self, step: "list devices")) ?? []
+        let ours = devices.filter { ((try? CoreAudioHAL.getString($0, kAudioDevicePropertyDeviceUID, step: "uid")) ?? "").hasPrefix(aggregateUIDPrefix) }
         return (taps, ours.count)
-    }
-
-    // MARK: Property helpers
-
-    private static func address(_ selector: AudioObjectPropertySelector,
-                                scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
-    }
-
-    private static func describe(_ f: AudioStreamBasicDescription) -> String {
-        let float = f.mFormatFlags & kAudioFormatFlagIsFloat != 0
-        let interleaved = f.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
-        return "\(f.mSampleRate)Hz/\(f.mChannelsPerFrame)ch/\(f.mBitsPerChannel)bit\(float ? "f" : "i")/\(interleaved ? "interleaved" : "planar")/'\(fourCC(OSStatus(bitPattern: f.mFormatID)))'"
-    }
-
-    private static func check(_ status: OSStatus, _ step: String) throws {
-        guard status == noErr else { throw SystemAudioTapError.coreAudio(step: step, status: status) }
-    }
-
-    private static func get<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, step: String) throws -> T {
-        var address = address(selector)
-        var size = UInt32(MemoryLayout<T>.size)
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<T>.size, alignment: MemoryLayout<T>.alignment)
-        defer { raw.deallocate() }
-        try check(AudioObjectGetPropertyData(object, &address, 0, nil, &size, raw), step)
-        return raw.load(as: T.self)
-    }
-
-    private static func getString(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, step: String) throws -> String {
-        var address = address(selector)
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        var value: Unmanaged<CFString>?
-        try withUnsafeMutablePointer(to: &value) { ptr in
-            try check(AudioObjectGetPropertyData(object, &address, 0, nil, &size, ptr), step)
-        }
-        guard let value else { throw SystemAudioTapError.coreAudio(step: step, status: -1) }
-        return value.takeRetainedValue() as String
-    }
-
-    private static func getArray<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ type: T.Type,
-                                    scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
-                                    step: String) throws -> [T] {
-        var address = address(selector, scope: scope)
-        var size: UInt32 = 0
-        try check(AudioObjectGetPropertyDataSize(object, &address, 0, nil, &size), step)
-        let count = Int(size) / MemoryLayout<T>.stride
-        guard count > 0 else { return [] }
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<T>.alignment)
-        defer { raw.deallocate() }
-        try check(AudioObjectGetPropertyData(object, &address, 0, nil, &size, raw), step)
-        let n = Int(size) / MemoryLayout<T>.stride
-        return (0..<n).map { raw.load(fromByteOffset: $0 * MemoryLayout<T>.stride, as: T.self) }
     }
 }

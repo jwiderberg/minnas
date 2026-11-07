@@ -519,7 +519,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     }
 
     @objc private func turnFolderOff() {
-        Settings.shared.transcriptsFolderPath = nil
+        try? Settings.shared.reset(.transcriptsFolderPath)
         reloadGeneral()
     }
 
@@ -676,7 +676,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func engineChanged() {
         guard let raw = enginePopup.selectedItem?.representedObject as? String,
               let kind = SystemAudioEngineKind(rawValue: raw) else { return }
-        Settings.shared.systemAudioEngine = kind
+        Settings.shared.set(Setting.systemAudioEngine, kind)
         rebuildPermissions()
     }
 
@@ -707,7 +707,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func modelChanged() {
         guard let raw = modelPopup.selectedItem?.representedObject as? String,
               let model = TranscriptionModel(rawValue: raw) else { return }
-        Settings.shared.defaultModel = model
+        Settings.shared.set(Setting.defaultModel, model)
     }
 
     @objc private func languagesChanged() {
@@ -753,11 +753,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     }
 
     @objc private func diarizeToggled() {
-        Settings.shared.diarizeEnabled = diarizeCheckbox.state == .on
+        Settings.shared.set(Setting.diarizeEnabled, diarizeCheckbox.state == .on)
     }
 
     @objc private func voiceMemoChanged() {
-        Settings.shared.voiceMemoUsesAppleTranscript = voiceMemoPopup.indexOfSelectedItem == 1
+        Settings.shared.set(Setting.voiceMemoUsesAppleTranscript, voiceMemoPopup.indexOfSelectedItem == 1)
     }
 
     private func saveExcluded() {
@@ -766,7 +766,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         excludedIDs = excludedIDs
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
-        Settings.shared.systemAudioExcludedBundleIDs = excludedIDs
+        Settings.shared.set(Setting.systemAudioExcludedBundleIDs, excludedIDs)
         reloadTranscription()
     }
 
@@ -876,7 +876,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     }
 
     @objc private func cloudToggled() {
-        Settings.shared.cloudTranscriptionEnabled = cloudCheckbox.state == .on
+        Settings.shared.set(Setting.cloudTranscriptionEnabled, cloudCheckbox.state == .on)
         SettingsUI.show(keyMessage, error: nil)
         reloadCloud()
     }
@@ -888,7 +888,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             return
         }
         do {
-            try Settings.shared.setOpenAIKey(value)
+            try Settings.shared.setValue(fromString: value, for: .openAIKey)
             keyField.stringValue = ""
             SettingsUI.show(keyMessage, info: "Saved.")
         } catch {
@@ -899,7 +899,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     @objc private func removeKey() {
         do {
-            try Settings.shared.deleteOpenAIKey()
+            try Settings.shared.reset(.openAIKey)
             SettingsUI.show(keyMessage, info: Config.resolve(.openAIKey) == nil
                 ? "Removed."
                 : "Removed from the Keychain; a developer override still supplies one.")

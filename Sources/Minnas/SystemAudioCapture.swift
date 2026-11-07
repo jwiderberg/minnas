@@ -37,38 +37,34 @@ enum SystemAudioCaptureError: Error {
     case streamStartFailed(underlying: Error)
 }
 
-/// One-shot latch for stop()'s finishWriting-versus-deadline race: the first
-/// claim() wins and resumes the continuation, the other side does nothing.
-final class FinishLatch: Sendable {
-    private let claimed = Atomic<Bool>(false)
-    func claim() -> Bool { !claimed.exchange(true, ordering: .acquiringAndReleasing) }
-}
-
 /// Thread ownership (why `@unchecked Sendable` is sound here):
 ///
-/// - Main actor: `running`, `restartTask`, `attachedAt`, `silentRestarts`,
-///   `restartCount`, `stalledSince`, and `stream`. start() and startStream()
-///   are nonisolated and assign `stream` right after startCapture returns,
-///   before RecordingSession returns from start, i.e. before the recording
-///   tick can call checkHealth; every later assignment is @MainActor. A
-///   buffer SCKit delivers in the moment between startCapture returning and
-///   that assignment fails the identity check below and is dropped; the
-///   next buffer's gap fill covers it. The delivery queue never reads
-///   `stream` itself, only its mirrored identity.
+/// - Main actor: `running`, `restartTask`, `backoff`, `restartCount`, and
+///   `stream`. start() and startStream() are nonisolated and assign
+///   `stream` (and note the attach in `backoff`) right after startCapture
+///   returns, before RecordingSession returns from start, i.e. before the
+///   recording tick can call checkHealth; every later assignment is
+///   @MainActor. A buffer SCKit delivers in the moment between startCapture
+///   returning and that assignment fails the identity check below and is
+///   dropped; the next buffer's gap fill covers it. The delivery queue never
+///   reads `stream` itself, only its mirrored identity.
 /// - Written by start() only while no stream is delivering, read on the
-///   delivery queue: `filter`, `config`, `writer`, `audioInput`. start()
-///   sets them before the first startStream; stop() releases `writer` and
-///   `audioInput` ON the write queue, so a buffer still in flight after a
-///   timed-out finish cannot race the release.
+///   delivery queue: `filter`, `config`.
+/// - `caf`, the PaddedCAFWriter that owns the AVAssetWriter, its input, the
+///   session start and the timeline end: confined to `writeQueue`. The
+///   exceptions are its own: start() opens it (and, if the first stream
+///   fails, cancels it) before any stream delivers, and stop()'s
+///   finish(timeout:) does its work on the write queue and releases the
+///   writer there, so a buffer still in flight after a timed-out finish
+///   cannot race the release.
 /// - `writeQueue` (SCKit's sample-handler queue for every stream we
-///   create): `sessionStarted`, `lastPTSEnd`, `lastFormat`,
-///   `fillGapOnNextBuffer` (the restart path sets it with
-///   `writeQueue.async`, never directly).
+///   create): `lastFormat`, `fillGapOnNextBuffer` (the restart path sets it
+///   with `writeQueue.async`, never directly).
 /// - Shared across threads, so atomic or locked: `currentStreamID` (the
 ///   identity of `stream`, mirrored by its didSet, compared on the delivery
 ///   queue), `stopRequested` (behind `stoppingByRequest`; also read by the
-///   delegate on SCKit's queue), `peakBits`, `signalLatch`, `paddedBits`,
-///   and the counters below.
+///   delegate on SCKit's queue), `peakBits`, `signalLatch`, `cafStats`
+///   (writer drops, padding, failure, timeout), and the counters below.
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SystemAudioEngine, @unchecked Sendable {
     private let outputURL: URL
     private var stream: SCStream? {
@@ -79,9 +75,9 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     private let currentStreamID = Mutex<ObjectIdentifier?>(nil)
     private var filter: SCContentFilter?
     private var config: SCStreamConfiguration?
-    private var writer: AVAssetWriter?
-    private var audioInput: AVAssetWriterInput?
-    private var sessionStarted = false
+    /// The file, confined to writeQueue (see above). Its timeline end is in
+    /// SCKit's presentation-time domain.
+    private let caf: PaddedCAFWriter
     /// Set by stop() on the main actor, read there and by the delegate's
     /// didStopWithError on SCKit's queue.
     private let stopRequested = Atomic<Bool>(false)
@@ -108,46 +104,31 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     // Wall-clock of the last buffer of ANY kind — the liveness signal.
     private let lastBufferBits = Atomic<UInt64>(0)
     private let bufferCount = Atomic<UInt64>(0)
-    // Buffers SCKit delivered that the writer input wasn't ready for. Their
-    // span becomes a hole the next buffer pads (see didOutputSampleBuffer).
-    private let droppedCount = Atomic<UInt64>(0)
-    private let writerFailed = Atomic<Bool>(false)
+    /// Writer drops (buffers SCKit delivered that the writer input wasn't
+    /// ready for; their span becomes a hole the next buffer pads, see
+    /// didOutputSampleBuffer), padding, failure and finish timeout. Outlives
+    /// the writer: capture_health reads it after stop().
+    private let cafStats = CAFWriterStats()
     // Delivery-queue state for gap filling across a restart.
-    private var lastPTSEnd: CMTime = .invalid
     private var lastFormat: CMFormatDescription?
     private var fillGapOnNextBuffer = false
-    /// Double bit pattern of the padded total: written only by fillGap on
-    /// the delivery queue, read by the main actor (capture_health, stop log).
-    private let paddedBits = Atomic<UInt64>(0)
-    private var paddedSeconds: Double {
-        get { Double(bitPattern: paddedBits.load(ordering: .relaxed)) }
-        set { paddedBits.store(newValue.bitPattern, ordering: .relaxed) }
-    }
     private var restartTask: Task<Void, Never>?
-    private var attachedAt = Date.distantPast
-    private var silentRestarts = 0
+    private var backoff = RestartBackoff()
     private(set) var restartCount = 0
     /// When the stream stopped delivering and hasn't come back; nil while
     /// healthy.
-    private(set) var stalledSince: Date?
+    var stalledSince: Date? { backoff.stalledSince }
 
-    var lastSignalAt: Date? { Self.date(fromBits: lastSignalBits.load(ordering: .relaxed)) }
-    var lastBufferAt: Date? { Self.date(fromBits: lastBufferBits.load(ordering: .relaxed)) }
+    var lastSignalAt: Date? { Date(epochBits: lastSignalBits.load(ordering: .relaxed)) }
+    var lastBufferAt: Date? { Date(epochBits: lastBufferBits.load(ordering: .relaxed)) }
     var buffersDelivered: UInt64 { bufferCount.load(ordering: .relaxed) }
-    var buffersDropped: UInt64 { droppedCount.load(ordering: .relaxed) }
-    var paddedSecondsTotal: Double { paddedSeconds }
+    var buffersDropped: UInt64 { cafStats.dropped }
+    var paddedSecondsTotal: Double { cafStats.paddedSeconds }
     /// The asset writer refused data — the file can't be recovered by a
     /// stream restart; the user has to stop and start a new recording.
-    var hasWriterFailed: Bool { writerFailed.load(ordering: .relaxed) }
+    var hasWriterFailed: Bool { cafStats.hasFailed }
 
-    private let writeQueue = DispatchQueue(label: "minnas.system-audio.write")
-
-    /// How long stop() waits for finishWriting before abandoning the writer.
-    static let finishWritingTimeout: Double = 10
-
-    /// Upper bound on one silence fill. A restart is back in seconds; a
-    /// bigger PTS gap is a clock anomaly, and padding it could fill the disk.
-    static let maxFillSeconds: Double = 300
+    private let writeQueue: DispatchQueue
 
     // Called when the stream is gone and could not be brought back (20
     // restart attempts failed, e.g. Screen Recording permission revoked).
@@ -157,11 +138,10 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
 
     init(outputURL: URL) {
         self.outputURL = outputURL
+        let writeQueue = DispatchQueue(label: "minnas.system-audio.write")
+        self.writeQueue = writeQueue
+        self.caf = PaddedCAFWriter(queue: writeQueue, stats: cafStats, log: sysLog)
         super.init()
-    }
-
-    private static func date(fromBits bits: UInt64) -> Date? {
-        bits == 0 ? nil : Date(timeIntervalSince1970: Double(bitPattern: bits))
     }
 
     /// Live peak amplitude since last query (0.0 — 1.0). Used by the
@@ -223,51 +203,39 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
         self.filter = filter
         self.config = config
 
-        let writer: AVAssetWriter
-        do {
-            writer = try AVAssetWriter(outputURL: outputURL, fileType: .caf)
+        // The fixed CAF output format, no source hint (SCKit's format is
+        // only known from the first buffer). Nothing delivers yet, so this
+        // runs off the write queue.
+        do throws(PaddedCAFWriter.OpenError) {
+            try caf.open(url: outputURL, sourceFormatHint: nil)
         } catch {
-            throw SystemAudioCaptureError.writerInitFailed(underlying: error)
-        }
-
-        let audioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 48000,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        input.expectsMediaDataInRealTime = true
-        // Without the input, startWriting would succeed and every append
-        // would fail — a recording of nothing that looks healthy at start.
-        guard writer.canAdd(input) else {
-            throw SystemAudioCaptureError.writerInitFailed(
-                underlying: NSError(domain: "SystemAudioCapture", code: -3,
-                                    userInfo: [NSLocalizedDescriptionKey: "asset writer refused the audio input (canAdd == false)"]))
-        }
-        writer.add(input)
-        self.writer = writer
-        self.audioInput = input
-
-        guard writer.startWriting() else {
-            throw SystemAudioCaptureError.writerInitFailed(
-                underlying: writer.error ?? NSError(domain: "SystemAudioCapture", code: -1)
-            )
+            throw Self.writerInitError(error)
         }
 
         do {
             try await startStream()
         } catch {
-            writer.cancelWriting()
-            self.writer = nil
-            self.audioInput = nil
+            caf.cancelBeforeFirstAppend()
             self.stream = nil
             throw error
         }
         running = true
+    }
+
+    /// PaddedCAFWriter's open errors, as the errors this engine has always
+    /// reported: the AVAssetWriter init error as is, -3 for canAdd refused,
+    /// startWriting's error or else -1.
+    private static func writerInitError(_ error: PaddedCAFWriter.OpenError) -> SystemAudioCaptureError {
+        switch error {
+        case .create(let underlying):
+            return .writerInitFailed(underlying: underlying)
+        case .inputRefused:
+            return .writerInitFailed(
+                underlying: NSError(domain: "SystemAudioCapture", code: -3,
+                                    userInfo: [NSLocalizedDescriptionKey: "asset writer refused the audio input (canAdd == false)"]))
+        case .startFailed(let underlying):
+            return .writerInitFailed(underlying: underlying ?? NSError(domain: "SystemAudioCapture", code: -1))
+        }
     }
 
     /// Creates and starts an SCStream on the stored filter/config. Used by
@@ -286,7 +254,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
             throw SystemAudioCaptureError.streamStartFailed(underlying: error)
         }
         self.stream = stream
-        attachedAt = Date()
+        backoff.noteAttached()
     }
 
     /// Watchdog hook, called from the app's recording tick. Re-creates the
@@ -295,9 +263,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     @MainActor
     func checkHealth() {
         guard running, !stoppingByRequest, restartTask == nil else { return }
-        let last = lastBufferAt.map { max($0, attachedAt) } ?? attachedAt
-        let threshold = min(60.0, 3.0 * pow(2.0, Double(silentRestarts)))
-        if Date().timeIntervalSince(last) > threshold {
+        if let threshold = backoff.overdue(lastBufferAt: lastBufferAt) {
             scheduleRestart(reason: "no buffers for \(Int(threshold)) s")
         }
     }
@@ -313,14 +279,12 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     @MainActor
     private func scheduleRestart(reason: String) {
         guard running, !stoppingByRequest, restartTask == nil else { return }
-        if stalledSince == nil { stalledSince = Date() }
-        let deliveredSinceAttach = (lastBufferAt ?? .distantPast) > attachedAt
-        if restartCount > 0, !deliveredSinceAttach { silentRestarts += 1 } else { silentRestarts = 0 }
+        backoff.noteRestartScheduled(restartsSoFar: restartCount, lastBufferAt: lastBufferAt)
         sysLog.error("system audio stalled (\(reason, privacy: .public)); restarting stream")
         restartTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.restartTask = nil }
-            for attempt in 1...20 {
+            for attempt in 1...RestartBackoff.attemptsPerBatch {
                 guard self.running, !self.stoppingByRequest, !Task.isCancelled else { return }
                 do {
                     if let old = self.stream {
@@ -347,12 +311,12 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
                         return
                     }
                     self.restartCount += 1
-                    self.stalledSince = nil
+                    self.backoff.noteRecovered()
                     sysLog.notice("system audio stream restarted (\(reason, privacy: .public), attempt \(attempt, privacy: .public))")
                     return
                 } catch {
                     sysLog.error("system audio restart attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: RestartBackoff.retryDelay)
                 }
             }
             guard !self.stoppingByRequest, !Task.isCancelled else { return }
@@ -382,53 +346,18 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
         }
         stream = nil
 
-        // Flush the writer. finishWriting is async on a callback; bridge
-        // it to async/await so RecordingSession can sequence cleanup.
-        // Bounded like the taps engine: a wedged writer must not hang stop()
+        // Flush the writer, bounded: a wedged writer must not hang stop()
         // (AppDelegate's isStopping would stay true, Stop would be dead and
-        // the mic would keep recording). The deadline fires from a global
-        // queue, so even a blocked writeQueue can't hold stop() past it.
-        // On timeout the writer is abandoned, NOT cancelled: per
-        // AVAssetWriter.h, -cancelWriting "will block until writing is
-        // canceled" and "If an output file was created by the receiver
-        // during the writing process, -cancelWriting will delete the file"
-        // — that would throw away the whole system track. The completion
-        // handler keeps the writer alive, so a late finish still finalises
-        // the file.
-        var writerTimedOut = false
-        if let writer, let input = audioInput {
-            let latch = FinishLatch()
-            nonisolated(unsafe) let keepAlive = writer
-            let finished: Bool = await withCheckedContinuation { cont in
-                writeQueue.async {
-                    input.markAsFinished()
-                    writer.finishWriting {
-                        if latch.claim() {
-                            cont.resume(returning: true)
-                        } else {
-                            sysLog.notice("finishWriting completed after the deadline (writer status \(keepAlive.status.rawValue, privacy: .public))")
-                        }
-                    }
-                }
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.finishWritingTimeout) {
-                    if latch.claim() { cont.resume(returning: false) }
-                }
-            }
-            if !finished {
-                writerTimedOut = true
-                sysLog.error("finishWriting did not complete within \(Int(Self.finishWritingTimeout), privacy: .public) s (writer status \(keepAlive.status.rawValue, privacy: .public)); abandoning the writer without cancelWriting, which would delete the file")
-            }
-        }
-        sysLog.notice("stop: buffers=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSeconds), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(writerTimedOut, privacy: .public)")
-        // Released on the write queue, not here: after a timed-out finish
-        // that queue may still be blocked with a buffer in flight that reads
-        // `writer`/`audioInput`; clearing them from this actor would race it.
-        // A recording gets a fresh engine instance, so nothing reads them
-        // again from this side.
-        writeQueue.async { [self] in
-            self.writer = nil
-            self.audioInput = nil
-        }
+        // the mic would keep recording). PaddedCAFWriter.finish runs
+        // finishWriting on the write queue and races a 10 s deadline fired
+        // from a global queue, so even a blocked writeQueue can't hold stop()
+        // past it. On timeout it logs and abandons the writer, NOT cancels
+        // it (cancelWriting deletes the file); a late finish still finalises
+        // the file. The writer is released on the write queue, so a buffer
+        // still in flight after a timed-out finish cannot race the release.
+        let finished = await caf.finish(timeout: PaddedCAFWriter.finishTimeout)
+        let writerTimedOut = !finished
+        sysLog.notice("stop: buffers=\(self.buffersDelivered, privacy: .public) hasSignal=\(self.hasSignal, privacy: .public) restarts=\(self.restartCount, privacy: .public) dropped=\(self.buffersDropped, privacy: .public) paddedSeconds=\(String(format: "%.1f", self.paddedSecondsTotal), privacy: .public) writerFailed=\(self.hasWriterFailed, privacy: .public) writerTimedOut=\(writerTimedOut, privacy: .public)")
     }
 
     // MARK: SCStreamDelegate
@@ -448,7 +377,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
-        guard let writer, let input = audioInput else { return }
+        guard caf.isOpen else { return }
         guard sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
         // A buffer from a stream we've already replaced must not land
         // between the restart's padding and the new stream's audio. Compared
@@ -456,99 +385,58 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
         // actor.
         guard currentStreamID.withLock({ $0 }) == ObjectIdentifier(stream) else { return }
 
-        if !sessionStarted {
-            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
-            sessionStarted = true
+        if !caf.sessionStarted {
+            caf.startSession(atSourceTime: sampleBuffer.presentationTimeStamp, seedTimeline: false)
         }
 
-        lastBufferBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+        lastBufferBits.store(Date().epochBits, ordering: .relaxed)
         bufferCount.wrappingAdd(1, ordering: .relaxed)
         updatePeakAmplitude(from: sampleBuffer)
 
         if fillGapOnNextBuffer {
             fillGapOnNextBuffer = false
-            fillGap(upTo: sampleBuffer.presentationTimeStamp, input: input, writer: writer)
+            fillGap(upTo: sampleBuffer.presentationTimeStamp)
         }
 
         lastFormat = sampleBuffer.formatDescription
-        guard input.isReadyForMoreMediaData else {
-            // Backpressure. lastPTSEnd stays at the last buffer that made it
-            // into the file, so the hole is padded by the next buffer instead
-            // of silently shortening the track, and the drop is counted.
-            let dropped = droppedCount.wrappingAdd(1, ordering: .relaxed).newValue
+        // No wait for the input. A refused append that failed the writer is
+        // logged once by PaddedCAFWriter and latched in cafStats; the
+        // timeline end still moves past the buffer.
+        switch caf.append(sampleBuffer, readyWait: 0) {
+        case .appended, .writerFailed:
+            break
+        case .dropped(let dropped):
+            // Backpressure. The timeline end stays at the last buffer that
+            // made it into the file, so the hole is padded by the next
+            // buffer instead of silently shortening the track, and the drop
+            // is counted.
             if dropped == 1 || dropped.isMultiple(of: 100) {
                 sysLog.error("writer input not ready; dropped system-audio buffer (\(dropped, privacy: .public) so far)")
             }
             fillGapOnNextBuffer = true
-            return
         }
-        if !input.append(sampleBuffer), writer.status == .failed {
-            if !writerFailed.load(ordering: .relaxed) {
-                sysLog.error("asset writer failed: \(writer.error?.localizedDescription ?? "unknown", privacy: .public)")
-            }
-            writerFailed.store(true, ordering: .relaxed)
-        }
-        lastPTSEnd = CMTimeAdd(sampleBuffer.presentationTimeStamp, sampleBuffer.duration)
     }
 
-    /// Appends zeros covering [lastPTSEnd, pts) so a stream restart or a
+    /// Appends zeros covering [timeline end, pts) so a stream restart or a
     /// run of dropped buffers leaves no hole: whatever the writer would do
     /// with a timestamp gap, the file now carries real time. Delivery queue
-    /// only.
-    private func fillGap(upTo pts: CMTime, input: AVAssetWriterInput, writer: AVAssetWriter) {
-        guard lastPTSEnd.isValid, let format = lastFormat,
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee else { return }
-        let gap = CMTimeSubtract(pts, lastPTSEnd).seconds
-        guard gap.isFinite, gap <= Self.maxFillSeconds else {
-            sysLog.error("system-audio PTS gap \(String(format: "%.3f", gap), privacy: .public) s is non-finite or over the \(Int(Self.maxFillSeconds), privacy: .public) s cap; not padding it")
-            return
-        }
-        guard gap > 0.05 else {
+    /// only. PaddedCAFWriter rejects a non-finite gap or one over its 300 s
+    /// cap, skips one of 0.05 s or less, writes 1 s chunks with a 2 s wait
+    /// for the writer each, and leaves the timeline end where a partial fill
+    /// stopped, so the next fill doesn't pad the same stretch again.
+    private func fillGap(upTo pts: CMTime) {
+        guard let format = lastFormat,
+              CMAudioFormatDescriptionGetStreamBasicDescription(format) != nil else { return }
+        switch caf.fillGap(upTo: pts, format: format, minimum: 0.05) {
+        case .noTimeline:
+            break
+        case .rejected(let gap):
+            sysLog.error("system-audio PTS gap \(String(format: "%.3f", gap), privacy: .public) s is non-finite or over the \(Int(PaddedCAFWriter.maxFillSeconds), privacy: .public) s cap; not padding it")
+        case .belowMinimum(let gap):
             sysLog.notice("system-audio gap \(String(format: "%.3f", gap), privacy: .public) s — no padding needed")
-            return
+        case .filled(let padded, let gap):
+            sysLog.notice("padded system track with \(String(format: "%.2f", padded), privacy: .public) s of silence across a stream restart or dropped buffers (gap \(String(format: "%.2f", gap), privacy: .public) s)")
         }
-        let rate = asbd.mSampleRate
-        let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        let bytesPerFrameAllChannels = Int(asbd.mBytesPerFrame) * (nonInterleaved ? Int(asbd.mChannelsPerFrame) : 1)
-        var remaining = Int(gap * rate)
-        var cursor = lastPTSEnd
-        var written = 0
-        while remaining > 0 {
-            let frames = min(remaining, Int(rate))
-            let bytes = frames * bytesPerFrameAllChannels
-            var block: CMBlockBuffer?
-            guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: bytes,
-                                                     blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-                                                     dataLength: bytes, flags: 0, blockBufferOut: &block) == kCMBlockBufferNoErr,
-                  let block, CMBlockBufferFillDataBytes(with: 0, blockBuffer: block, offsetIntoDestination: 0, dataLength: bytes) == kCMBlockBufferNoErr
-            else { break }
-            var silent: CMSampleBuffer?
-            let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-                allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format,
-                sampleCount: frames, presentationTimeStamp: cursor, packetDescriptions: nil, sampleBufferOut: &silent)
-            guard status == noErr, let silent else { break }
-            // Bounded: after markAsFinished or a writer failure the input
-            // never becomes ready again, and this runs on the delivery queue.
-            let deadline = Date().addingTimeInterval(2)
-            var ready = input.isReadyForMoreMediaData
-            while !ready, writer.status == .writing, Date() < deadline {
-                usleep(2_000)
-                ready = input.isReadyForMoreMediaData
-            }
-            guard ready else {
-                sysLog.error("gap fill gave up: writer input not ready after 2 s (writer status \(writer.status.rawValue, privacy: .public))")
-                break
-            }
-            guard input.append(silent) else { break }
-            written += frames
-            remaining -= frames
-            cursor = CMTimeAdd(cursor, CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(rate)))
-        }
-        paddedSeconds += Double(written) / rate
-        // A partial fill (gave up mid-way) must not be padded again from the
-        // old end by the next fill: the file now ends at the cursor.
-        lastPTSEnd = cursor
-        sysLog.notice("padded system track with \(String(format: "%.2f", Double(written) / rate), privacy: .public) s of silence across a stream restart or dropped buffers (gap \(String(format: "%.2f", gap), privacy: .public) s)")
     }
 
     /// Walk the first contiguous chunk of the sample buffer's PCM data
@@ -580,9 +468,9 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
             if localPeak > Float(bitPattern: self.peakBits.load(ordering: .relaxed)) {
                 self.peakBits.store(localPeak.bitPattern, ordering: .relaxed)
             }
-            if localPeak > 0.0001 {
+            if localPeak > CaptureSignal.epsilon {
                 self.signalLatch.store(true, ordering: .relaxed)
-                self.lastSignalBits.store(Date().timeIntervalSince1970.bitPattern, ordering: .relaxed)
+                self.lastSignalBits.store(Date().epochBits, ordering: .relaxed)
             }
         }
     }

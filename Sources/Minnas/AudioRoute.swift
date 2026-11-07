@@ -34,18 +34,7 @@ enum AudioRoute {
     /// virtual device).
     static func defaultInputDeviceName() -> String? {
         guard let device = defaultDeviceID(input: true) else { return nil }
-        var name: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = withUnsafeMutablePointer(to: &name) {
-            AudioObjectGetPropertyData(device, &address, 0, nil, &size, $0)
-        }
-        guard status == noErr, let cf = name?.takeRetainedValue() else { return nil }
-        return cf as String
+        return try? CoreAudioHAL.getString(device, kAudioObjectPropertyName, step: "default input name")
     }
 
     /// Whether the default input looks likely to capture silence for a
@@ -58,31 +47,21 @@ enum AudioRoute {
         return riskyMarkers.contains { name.contains($0) }
     }
 
+    // Both lookups map any failure to nil (`try?`), and nil equals no
+    // transport type, which is what keeps AEC off on an unknown route. The
+    // `as` pins the generic to the plain integer type: an inferred Optional
+    // would ask the HAL for a 5-byte value.
+
     private static func defaultDeviceID(input: Bool) -> AudioDeviceID? {
-        var deviceID = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: input ? kAudioHardwarePropertyDefaultInputDevice
-                             : kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
-        )
-        return status == noErr ? deviceID : nil
+        let selector = input ? kAudioHardwarePropertyDefaultInputDevice
+                             : kAudioHardwarePropertyDefaultOutputDevice
+        return try? CoreAudioHAL.get(
+            AudioObjectID(kAudioObjectSystemObject), selector,
+            step: input ? "default input device" : "default output device") as AudioDeviceID
     }
 
     private static func transportType(input: Bool) -> UInt32? {
         guard let device = defaultDeviceID(input: input) else { return nil }
-        var transport = UInt32(0)
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport)
-        return status == noErr ? transport : nil
+        return try? CoreAudioHAL.get(device, kAudioDevicePropertyTransportType, step: "transport type") as UInt32
     }
 }

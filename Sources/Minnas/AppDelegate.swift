@@ -1363,7 +1363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func setLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        Config.setSTTLanguage(code)
+        Settings.shared.set(Setting.sttLanguage, code)
         refreshStatusItem()
     }
 

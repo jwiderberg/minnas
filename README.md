@@ -341,7 +341,7 @@ bash scripts/make-app.sh          # build and assemble .build/Minnas.app
 swift run minnas --cleanup-test   # transcript-cleanup self-check, no models, no permissions
 swift run minnas --self-test      # delivery backoff and pruning rules
 bash scripts/test.sh              # swift-testing suite, no models, no permissions
-bash -n scripts/*.sh              # shell syntax check
+for f in scripts/*.sh; do bash -n "$f"; done   # shell syntax check, one file at a time
 ```
 
 The command-line harnesses run with `swift run minnas <flag>` and need no

@@ -338,9 +338,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         let value = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return true }
         do {
-            try Settings.shared.setOpenAIKey(value)
+            try Settings.shared.setValue(fromString: value, for: .openAIKey)
             // A key typed here means "I want the cloud option".
-            Settings.shared.cloudTranscriptionEnabled = true
+            Settings.shared.set(Setting.cloudTranscriptionEnabled, true)
             keyField.stringValue = ""
             return true
         } catch {

@@ -40,6 +40,25 @@ if [[ ! -f "$INFO_PLIST" ]]; then
     exit 1
 fi
 
+IDENTITY_NAME="Minnas Dev"
+# Validate the signing request before the old bundle is torn down, so a bad
+# CODESIGN_IDENTITY or CODESIGN_KEYCHAIN cannot leave an unsigned bundle in
+# place of a working one.
+if [[ -n "${CODESIGN_KEYCHAIN:-}" && -z "${CODESIGN_IDENTITY:-}" ]]; then
+    echo "FAIL: CODESIGN_KEYCHAIN is set but CODESIGN_IDENTITY is not; the default identity is looked up in the login keychain." >&2
+    exit 1
+fi
+if [[ -n "${CODESIGN_KEYCHAIN:-}" && ! -f "$CODESIGN_KEYCHAIN" ]]; then
+    echo "FAIL: CODESIGN_KEYCHAIN '$CODESIGN_KEYCHAIN' does not exist." >&2
+    exit 1
+fi
+if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    if ! security find-identity -p codesigning -v ${CODESIGN_KEYCHAIN:+"$CODESIGN_KEYCHAIN"} 2>/dev/null | grep -qF "\"$CODESIGN_IDENTITY\""; then
+        echo "FAIL: CODESIGN_IDENTITY '$CODESIGN_IDENTITY' is not a valid code-signing identity${CODESIGN_KEYCHAIN:+ in $CODESIGN_KEYCHAIN}." >&2
+        exit 1
+    fi
+fi
+
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
     # No swift invocation at all on this path, not even --show-bin-path:
     # SwiftPM evaluates the manifest, and the release workflow runs this
@@ -83,15 +102,7 @@ fi
 # microphone, system audio and calendar grants off. Fall back to ad-hoc with
 # a warning if the identity isn't installed; that mode works but TCC will
 # revoke the grants on every rebuild.
-IDENTITY_NAME="Minnas Dev"
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-    if [[ -n "${CODESIGN_KEYCHAIN:-}" ]]; then
-        [[ -f "$CODESIGN_KEYCHAIN" ]] || { echo "FAIL: CODESIGN_KEYCHAIN '$CODESIGN_KEYCHAIN' does not exist." >&2; exit 1; }
-    fi
-    if ! security find-identity -p codesigning -v ${CODESIGN_KEYCHAIN:+"$CODESIGN_KEYCHAIN"} 2>/dev/null | grep -qF "\"$CODESIGN_IDENTITY\""; then
-        echo "FAIL: CODESIGN_IDENTITY '$CODESIGN_IDENTITY' is not a valid code-signing identity${CODESIGN_KEYCHAIN:+ in $CODESIGN_KEYCHAIN}." >&2
-        exit 1
-    fi
     TIMESTAMP="--timestamp=none"
     case "$CODESIGN_IDENTITY" in
         "Developer ID Application:"*) TIMESTAMP="--timestamp" ;;
@@ -104,7 +115,7 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
     else
         codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --entitlements "$ENTITLEMENTS" "$TIMESTAMP" "$APP_DIR"
     fi
-elif security find-identity -p codesigning -v 2>/dev/null | grep -q "$IDENTITY_NAME"; then
+elif security find-identity -p codesigning -v 2>/dev/null | grep -qF "\"$IDENTITY_NAME\""; then
     echo "==> codesign with '$IDENTITY_NAME'"
     codesign --force --sign "$IDENTITY_NAME" --options runtime --entitlements "$ENTITLEMENTS" --timestamp=none "$APP_DIR"
 else

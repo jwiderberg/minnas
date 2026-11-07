@@ -70,6 +70,8 @@ jobs:
       - name: Self-check (--self-test)
         run: swift run minnas --self-test
 
+      # One file per bash -n: with several arguments bash parses only the
+      # first and treats the rest as that script's arguments.
       - name: Shell syntax
         run: |
           set -e

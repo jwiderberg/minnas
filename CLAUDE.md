@@ -35,8 +35,8 @@ bash scripts/make-app.sh          # build + assemble + sign .build/Minnas.app
 open .build/Minnas.app            # launch the menubar app
 swift run minnas --cleanup-test   # transcript text filters; run after touching TranscriptBuilder
 swift run minnas --self-test      # RetrySchedule + pruning rule
-bash scripts/test.sh   # swift-testing suite (selects the Xcode toolchain if needed)
-bash -n scripts/*.sh
+bash scripts/test.sh              # swift-testing suite; selects the Xcode toolchain when xcode-select points at the CLT
+for f in scripts/*.sh; do bash -n "$f"; done   # one file per bash -n: with several, bash parses only the first
 ```
 
 Requires Swift 6.2+ (Xcode 26, which runs on macOS 15.6+) to build; the app
@@ -45,6 +45,11 @@ runs on macOS 15+. The floor is macOS 15 in both `Package.swift` and
 it). Nothing in the code needs a newer OS. macOS 14 is excluded on purpose
 (a Core ML BNNS crash FluidAudio documents on 14.x). Keep the two floors in
 step, and don't add `if #available` branches for anything older than 15.
+CI (`macos-15` image, the newest Xcode 26 on it; 26.3 = Swift 6.2.4 at the
+time of writing) is the only Swift 6.2 check: Xcode 26.6's Swift 6.3 is
+laxer about region isolation (6.2 refused to send a `[weak owner]` capture
+box into a `Task { @MainActor }`; bind a strong `let` first), so a green
+local build does not prove the CI build.
 
 ## Harnesses
 
@@ -238,8 +243,8 @@ of a meeting while the menubar keeps saying "recording". The rules:
 - **Distribution:** `scripts/install.sh` (build from source, local signing
   identity after an explicit yes, copy to /Applications, prints the usage
   strings from Info.plist; `--dry-run`) and `scripts/uninstall.sh` (asks per
-  item; `tccutil reset`s). CI builds, runs `swift test`, `--cleanup-test`
-  and `--self-test`, and dry-runs both scripts.
+  item; `tccutil reset`s). CI builds, runs `swift test`, `--cleanup-test`,
+  `--self-test`, `bash -n` per script and the install/uninstall dry runs.
 
 ## App bundle, TCC and the signing identity
 
