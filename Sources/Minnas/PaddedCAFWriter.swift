@@ -13,7 +13,7 @@
 // Thread model (why `@unchecked Sendable` is sound): the writer is
 // QUEUE-CONFINED, not internally synchronized. Every method runs on the
 // `queue` passed to init (ScreenCaptureKit: the SCStream sample-handler
-// queue; taps: the drain queue), except:
+// queue; taps: its write queue), except:
 //   - open(url:sourceFormatHint:) — before anything is delivered on the
 //     queue (it sets the writer the queue then reads),
 //   - cancelBeforeFirstAppend() — start-failure path, nothing delivering,

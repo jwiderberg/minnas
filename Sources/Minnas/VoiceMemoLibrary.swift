@@ -16,12 +16,17 @@
 //
 // Apple's on-device transcript (iOS 18+) travels INSIDE the .qta as
 // track-level QuickTime metadata, key `com.apple.VoiceMemos.tsrp`: a JSON
-// blob with every word and its time range. When present we use it as the
-// transcript instead of running STT — it's already done, and it's good.
-// Older .m4a memos have no transcript; they go through the normal engines.
+// blob with every word and its time range. It is used as the transcript
+// only with VOICE_MEMO_TRANSCRIPT=apple (voiceMemoUsesAppleTranscript); by
+// default a memo goes through the default model like any recording,
+// because Apple's transcript mangles names. Older .m4a memos have no
+// transcript.
 //
 // The database is opened from a private copy (db + -wal + -shm) so we never
-// take a lock against the Voice Memos app or read a torn WAL state.
+// take a lock against the Voice Memos app. The three files are copied one
+// at a time, so a write between copies can tear the WAL; SQLite then shows
+// older rows or the read fails, and the picker retries on its next poll
+// (see VoiceMemoImport's load).
 //
 
 import AVFoundation

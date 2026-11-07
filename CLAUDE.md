@@ -39,6 +39,15 @@ bash scripts/test.sh              # swift-testing suite; selects the Xcode toolc
 for f in scripts/*.sh; do bash -n "$f"; done   # one file per bash -n: with several, bash parses only the first
 ```
 
+Tests live in `Tests/MinnasTests` (swift-testing); run them with
+`bash scripts/test.sh`, which points `DEVELOPER_DIR` at Xcode when
+`xcode-select` names the Command Line Tools (they can't find the Testing
+module). CI runs `swift test` directly. Suites: Smoke, Lifecycle,
+TranscriptBuilder (fixtures in `TranscriptBuilderFixtures.swift`, shared
+with `--cleanup-test`), TranscriberWindow, CaptureSupport, Settings
+(+ SettingsParser, serialized because it sets environment variables),
+PaddedCAFWriter. Add tests with any logic change.
+
 Requires Swift 6.2+ (Xcode 26, which runs on macOS 15.6+) to build; the app
 runs on macOS 15+. The floor is macOS 15 in both `Package.swift` and
 `App/Info.plist` (`LSMinimumSystemVersion`; `scripts/install.sh` enforces
@@ -72,6 +81,16 @@ at the midpoint), `--audio-test`, `--calendar [within_minutes]` (EventKit),
 `--settings-window [tab] [--test-key] [--grant-calendar] [--snapshot <dir>]`,
 `--onboarding [1-4] [--snapshot <dir>]`, `--memo-window` (the Voice Memos picker on its own).
 
+`--system-test` run as a bare binary from a terminal shows no signal
+(`hasSignal=false` in the stop line) even with audio playing, because the
+grant is attributed to the launching process (the terminal). Restart and
+padding proof works either way; for a real-signal check of the
+ScreenCaptureKit engine launch it like the tap test:
+
+```sh
+open -W -n -g --stdout /tmp/sys.log --stderr /tmp/sys.log --env SYSTEM_AUDIO_ENGINE=sck .build/Minnas.app --args --system-test 30 /tmp/sys.caf
+```
+
 `--tap-test <seconds> <out.caf>` exercises the process tap (signal, midpoint
 kill, output switch, no leaked taps/aggregate devices). The System Audio
 Recording grant is charged to the RESPONSIBLE process, so launch it through
@@ -82,7 +101,8 @@ open -W -n -g --stdout /tmp/tap.log --stderr /tmp/tap.log .build/Minnas.app --ar
 ```
 
 `TAP_TEST_FAIL_RESTARTS=1` makes every tap restart fail, to check that
-restart exhaustion fires `onUnexpectedStop` exactly once.
+restart exhaustion fires `onUnexpectedStop` exactly once. Keep harness runs
+at 20–30 s.
 
 CLI harnesses don't take the single-instance lock: don't run
 `--retranscribe` or the imports against a slot the app is recording.
@@ -96,21 +116,38 @@ and never restarts on its own. Unhandled, that silently loses the user's side
 of a meeting while the menubar keeps saying "recording". The rules:
 
 - `MicCapture` observes the notification **and** `checkHealth()` runs from the
-  10 Hz recording tick (engine not running, or no buffer for 3 s → re-attach).
+  10 Hz recording tick (engine not running, or no buffer for the stall
+  threshold → re-attach).
   The re-attach pads the mic file with silence for the dead stretch so it
   stays time-aligned with the system track, re-decides AEC for the new route,
   and resamples if the new input runs at another rate.
+- The stall threshold and restart bookkeeping come from `RestartBackoff`
+  (CaptureSupport.swift) in all three engines: 3 s, doubling per restart that
+  never delivered a buffer, capped at 60 s; batches of 20 attempts, 1 s
+  apart. Each engine keeps its own restart loop inline, because the loops'
+  guards differ.
 - The tap block is built in a `nonisolated static func`. A closure formed
   inside a `@MainActor` method inherits main-actor isolation and SIGTRAPs on
   the audio thread (`dispatch_assert_queue`). Don't inline it.
 - Padding is bounded: the mic pad is capped at 300 s and never covers a system
   sleep (`NSWorkspace` will-sleep/did-wake reset the stall clock); the system
   gap fill skips non-finite or > 300 s gaps, waits at most 2 s for the writer
-  and bails when it isn't `.writing`; `stop()` cancels and awaits any restart
-  in flight; dropped buffers are counted and leave a hole for the next fill.
-- Both system engines have the same watchdog (no buffer for 3 s, or the
-  stream reports an error → rebuild on the same writer; the next buffer fills
-  the timestamp gap with silence). Only 20 failed restarts end the recording
+  per 1 s chunk and bails when it isn't `.writing`; `stop()` cancels and
+  awaits any restart in flight; dropped buffers are counted and leave a hole
+  for the next fill. The system engines pad in host time, which doesn't
+  advance in sleep; the mic pads by wall clock and skips sleeps as above.
+- `PaddedCAFWriter` owns the CAF file for BOTH system engines: the
+  AVAssetWriter, the timeline end, the silence fills (a partial fill moves
+  the timeline to where it stopped) and the bounded finish below. It is
+  queue-confined (SCK: the SCStream sample-handler queue; taps: its write
+  queue) and DEBUG builds assert the queue. Its counters live in
+  `CAFWriterStats`, which outlives the writer, so capture_health reads them
+  after stop. Engine-specific log lines stay in the engines; the four shared
+  lines (the two finish-deadline lines, writer failed, gap fill gave up)
+  come from the writer through the engine's Logger.
+- Both system engines have the same watchdog (no buffer for the stall
+  threshold, or the stream reports an error → rebuild on the same writer;
+  the next buffer fills the timestamp gap with silence). Only 20 failed restarts end the recording
   (with an alert), and restart exhaustion is terminal (`running = false`
   before `onUnexpectedStop`). A writer refusing data (disk full) raises a
   critical alert — a stream restart can't fix a file.
@@ -128,10 +165,10 @@ of a meeting while the menubar keeps saying "recording". The rules:
   `recoverInterruptedRecordings` finishes any slot with raw .caf files and no
   ended_at, alerts, and transcribes it. `capture_health` in meta.json records
   restarts, padded seconds and captured seconds per stream.
-- Writer shutdown is bounded in both system engines (2026-11-06): `stop()`
-  waits at most 10 s for `finishWriting` (SCK: the continuation races a
-  global-queue deadline, so a wedged writer or write queue can't hang Stop),
-  then logs the writer status and abandons the writer. Never `cancelWriting`
+- Writer shutdown is bounded in both system engines (2026-11-06): the
+  writer's `finish` waits at most 10 s for `finishWriting` (the continuation
+  races a global-queue deadline, so a wedged writer or write queue can't
+  hang Stop), then logs the writer status and abandons the writer. Never `cancelWriting`
   there: per AVAssetWriter.h it blocks and deletes the output file. The stop
   line carries `writerTimedOut=`.
 - Quit runs the normal asynchronous stop path before terminating, so capture
@@ -142,9 +179,9 @@ of a meeting while the menubar keeps saying "recording". The rules:
   the app running. Launch recovery then queues finished slots with audio but
   no transcript/provenance before pruning, oldest first, and stops
   auto-retrying one after three attempts (`transcription_failures` is counted at job start and cleared on success, so a crash mid-job counts). A finished recording with only one surviving stream is transcribed from that stream instead of failing on the missing one.
-- **Test any change to `MicCapture`, `SystemAudioCapture` or
-  `SystemAudioTapCapture` with a real run from inside the bundle before
-  relaunching the app**: `--mic-test 30 /tmp/x.caf` / `--system-test` /
+- **Test any change to `MicCapture`, `SystemAudioCapture`,
+  `SystemAudioTapCapture`, `PaddedCAFWriter` or `AudioRoute` with a real
+  run from inside the bundle before relaunching the app**: `--mic-test 30 /tmp/x.caf` / `--system-test` /
   `--tap-test` (via `open -n`), and flip the default input and output device
   mid-run (a CoreAudio one-liner that sets
   `kAudioHardwarePropertyDefault{Input,Output}Device` does it). Expect the
@@ -208,8 +245,17 @@ of a meeting while the menubar keeps saying "recording". The rules:
   inside the `.app` bundle (a `swift run` binary has a new signature every
   build and would prompt). The bundle migrates the app-support `.env` into
   Settings once (`settings.migrated_v1`). A failed Keychain read is logged,
-  never silent. Defaults: no transcripts folder until setup, calendar off,
-  languages `["en"]`, engine `taps`, nothing excluded, 30 days of audio.
+  never silent. Every key is one typed `SettingSpec` in the `Setting` table
+  (kind, env name, storage key, default, parse/format/display), and
+  `SettingKey.spec` is the one exhaustive switch from key to spec;
+  `Config.resolve` applies the precedence above and `SettingsStorage.store`
+  validates through the same parse. The `@MainActor` facade is `allKeys` /
+  `set` / `setValue(fromString:)` / `reset` / `calendarSource` /
+  `onboardingCompleted`. SettingsTests freeze every storage key, env name and
+  default display, so a new key fails the frozen-list test until the literal
+  is updated on purpose. Defaults: no transcripts folder until setup,
+  calendar off, languages `["en"]`, engine `taps`, nothing excluded, 30 days
+  of audio.
 - **Delivery is a sink.** `TranscriptSink` (`MarkdownFolderSink`:
   `<yyyy-MM-dd HHmm> <title>.md` into `transcriptsFolderPath`) behind
   `SinkDispatcher`, which owns per-sink pending/retry state in meta
@@ -233,6 +279,12 @@ of a meeting while the menubar keeps saying "recording". The rules:
   `permissionSuspect` flags 10 s of zeros (so it is set before the 15 s
   silence pre-flight reads it) but cannot tell "denied" from "nothing
   playing".
+- **Shared capture code.** `CaptureSupport.swift`: `RestartBackoff` (above),
+  `Date.epochBits` (a Date published through one `Atomic<UInt64>`),
+  `HostClock` (mach ticks per second), `CaptureSignal.epsilon` (the signal
+  threshold). `CoreAudioHAL.swift`: the Core Audio property helpers used by
+  the taps engine and `AudioRoute`. `AudioRoute` fails closed: any HAL
+  failure → nil → AEC off (AEC over Bluetooth silences the mic).
 - **UI:** `SettingsWindow` (General / Transcription / Cloud / Calendar /
   Permissions; AppKit; every control writes through `Settings.shared`),
   `Onboarding` (4 steps on first launch, `settings.onboardingCompleted`;

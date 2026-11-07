@@ -59,7 +59,7 @@ all your transcriptions, regardless of platform, local and in an open format
 
 - Minnas captures the audio your Mac plays and the audio your microphone
   hears, so Zoom, Teams, Meet, FaceTime and a browser tab all look the same
-  to it. It never joins the call.
+  to it.
 - Transcription runs on the Apple Neural Engine with
   [WhisperKit](https://github.com/argmaxinc/WhisperKit). Speakers are told
   apart on the device too, with an on-device diarization model from

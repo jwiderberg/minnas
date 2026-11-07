@@ -658,9 +658,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         SettingsUI.show(excludedMessage, info: SettingsUI.overrideNote(for: .systemAudioExcludedBundleIDs))
     }
 
-    /// Local models always; the cloud model only while it is actually
-    /// usable, so the popup can never offer a choice that resolves to
-    /// something else (Config.defaultModel falls back to local).
     private func reloadEnginePopup() {
         enginePopup.removeAllItems()
         for kind in SystemAudioEngineKind.allCases {
@@ -691,6 +688,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         refreshStatuses()
     }
 
+    /// Local models always; the cloud model only while it is actually
+    /// usable, so the popup can never offer a choice that resolves to
+    /// something else (Config.defaultModel falls back to local).
     private func reloadModelPopup() {
         modelPopup.removeAllItems()
         let cloud = Config.cloudTranscriptionAvailable()

@@ -62,8 +62,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recoveryRetryTask: Task<Void, Never>?
 
     // Cached count of recordings with a pending delivery, for the menu
-    // badge. The menu is rebuilt every second during recording
-    // (refreshStatusItem), so scanning the outbox from disk each time is
+    // badge. The menu is rebuilt on every state change (refreshStatusItem:
+    // recording start and stop, each transcription job, deliveries, menu
+    // toggles), so scanning the outbox from disk each time is
     // wasteful. Invalidated (→ nil) whenever the pending set changes: a new
     // transcript is written, or a sink delivers. nil = recompute.
     private var cachedPendingDeliveryCount: Int?
@@ -1070,10 +1071,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             compressionTask = nil
         } catch {
             presentError("Transcription failed.", error: error)
-            // .caf files remain on disk for a manual retry. Future
-            // commit: add "Retry transcription" menu entry that
-            // re-runs against the most recent slot lacking a
-            // transcript.md.
+            // The audio stays on disk: launch recovery retries the slot
+            // (up to three attempts, transcription_failures) and the
+            // recording's "Re-transcribe with…" menu re-runs it by hand.
         }
     }
 

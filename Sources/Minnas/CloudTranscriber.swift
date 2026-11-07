@@ -8,10 +8,10 @@
 // parse the segments and offset their timestamps back to absolute time
 // → return one STTResult per chunk.
 //
-// We use the diarize model purely for its segment timestamps; speaker
-// labels are assigned downstream by stream (mic = Me, system = Them), so
-// diarized_json's own speaker ids are ignored for now. Splitting "Them"
-// into multiple remote speakers using those ids is a future enhancement.
+// The stream decides the side (mic = Me, system = Them). diarized_json's
+// speaker ids are passed through on each STTSegment, and TranscriptBuilder
+// labels the system stream's distinct ids "Them (A)", "Them (B)"; the
+// local diarizer is skipped for this model.
 //
 // NOTE: diarized_json's exact field set isn't fully documented; the
 // decoder below is deliberately lenient (all fields optional, with a

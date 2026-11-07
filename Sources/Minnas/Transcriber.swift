@@ -163,9 +163,10 @@ final class Transcriber: @unchecked Sendable {
         scores.sorted { $0.key < $1.key }.map { "\($0.key)=\(String(format: "%.3f", $0.value))" }.joined(separator: " ")
     }
 
-    /// Picks the dominant language among `candidates` by sampling several
-    /// 30s windows spread across the recording and summing WhisperKit's
-    /// per-window language log-probs. Sampling the whole file (not just the
+    /// Picks the dominant language among `candidates` by sampling 30 s
+    /// windows spread across the recording (at least 45 s apart) and summing
+    /// the detector's probability for its best candidate in each. Sampling
+    /// the whole file (not just the
     /// first window, which `detectLanguage(audioPath:)` uses) is what makes
     /// this robust: a Swedish meeting that opens with a few English words no
     /// longer mis-detects as English. Returns nil if nothing could be read.

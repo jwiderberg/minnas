@@ -65,8 +65,9 @@ final class RecordingSession {
     /// Last moment the mic delivered a non-zero sample (digital-silence alert).
     func micLastSignalAt() -> Date? { mic?.lastSignalAt }
 
-    /// Same watchdog for the system stream: re-creates the SCStream when it
-    /// stops delivering (the OS stopped it, a display change, …).
+    /// Same watchdog for the system stream: re-creates the stream (the
+    /// SCStream, or the process tap and its aggregate device) when it stops
+    /// delivering (the OS stopped it, a route change, …).
     func systemHealthCheck() { systemAudio?.checkHealth() }
     func systemStalledSince() -> Date? { systemAudio?.stalledSince }
     /// The system-audio file writer failed; a stream restart can't fix it.
