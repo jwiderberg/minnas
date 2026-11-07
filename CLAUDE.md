@@ -129,13 +129,20 @@ of a meeting while the menubar keeps saying "recording". The rules:
 - The tap block is built in a `nonisolated static func`. A closure formed
   inside a `@MainActor` method inherits main-actor isolation and SIGTRAPs on
   the audio thread (`dispatch_assert_queue`). Don't inline it.
-- Padding is bounded: the mic pad is capped at 300 s and never covers a system
-  sleep (`NSWorkspace` will-sleep/did-wake reset the stall clock); the system
-  gap fill skips non-finite or > 300 s gaps, waits at most 2 s for the writer
-  per 1 s chunk and bails when it isn't `.writing`; `stop()` cancels and
-  awaits any restart in flight; dropped buffers are counted and leave a hole
-  for the next fill. The system engines pad in host time, which doesn't
-  advance in sleep; the mic pads by wall clock and skips sleeps as above.
+- Padding is bounded: the mic pad is capped at 300 s (a longer gap pads 300 s
+  and logs an error) and gaps ≤ 0.05 s are not padded; the system gap fill
+  skips non-finite or > 300 s gaps, waits at most 2 s for the writer per
+  1 s chunk and bails when it isn't `.writing`; the system engines' `stop()`
+  cancels and awaits any restart in flight (the mic's only cancels it);
+  dropped buffers are counted and leave a hole for the next fill. All
+  three engines pad in host time: the mic tap records each buffer's end
+  host time, `MicCapture.padPlan` turns host-now minus that into the pad
+  and the watchdog's `lastBufferAt` derives from the same ticks. Host time
+  doesn't advance in sleep, so a sleep is neither padded nor seen as a
+  stall, and the awake dead time before a sleep is padded. The
+  `NSWorkspace` will-sleep/did-wake observers only log. The clocks are
+  injectable (`CaptureClock`, `MachClock` by default) and `MicPaddingTests`
+  simulates a sleep with them.
 - `PaddedCAFWriter` owns the CAF file for BOTH system engines: the
   AVAssetWriter, the timeline end, the silence fills (a partial fill moves
   the timeline to where it stopped) and the bounded finish below. It is
