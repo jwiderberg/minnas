@@ -374,10 +374,6 @@ final class MicCapture: @unchecked Sendable {
         return zeros
     }
 
-    /// Host time at which a buffer's audio ends: its start (the AVAudioTime's
-    /// host time when valid, else `now`) plus its duration, never later than
-    /// `now` — audio that was delivered has already been captured, and a
-    /// future timestamp would hold the watchdog off.
     /// start + duration, unclamped. When the host time is invalid or the sum
     /// overflows, the buffer's end is unknown and `fallback` (the clamped end,
     /// i.e. now) is used: the audio has been appended, so the nominal end must
@@ -392,6 +388,10 @@ final class MicCapture: @unchecked Sendable {
         return overflow ? fallback : end
     }
 
+    /// Host time at which a buffer's audio ends: its start (the AVAudioTime's
+    /// host time when valid, else `now`) plus its duration, never later than
+    /// `now` — audio that was delivered has already been captured, and a
+    /// future timestamp would hold the watchdog off.
     nonisolated static func bufferEndTicks(start: UInt64, hostTimeValid: Bool, frames: AVAudioFrameCount,
                                            sampleRate: Double, ticksPerSecond: Double, now: UInt64) -> UInt64 {
         let begin = hostTimeValid ? start : now
