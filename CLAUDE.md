@@ -351,11 +351,14 @@ the bundle on every build. Don't edit the built copy.
 
 ## In-room meetings
 
-When the system track carries no remote speech (fewer than 8 words,
+When the system track was captured (exists, writer never failed) but
+carries no remote speech (fewer than 8 words and under 5 s of speech,
 `TranscriptBuilder.hasNoRemoteSpeech`), the meeting happened in the room and
-everyone is on the mic: the mic track is diarized and its voices are
-labelled "Speaker (A)/(B)" like an import's (one voice found → "Me"). On a
-call the mic is always "Me".
+everyone is on the mic: the mic track is diarized instead of the system
+track and its voices are labelled "Speaker (A)/(B)" like an import's, only
+when at least two distinct voices came back; otherwise "Me". The system
+track's few words are "System audio" then. On a call the mic is always
+"Me". No per-recording override yet.
 
 ## Echo cancellation (after the call, never live)
 

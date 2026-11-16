@@ -462,10 +462,25 @@ import Testing
         [STTResult(segments: texts.map { STTSegment(start: $0.0, end: $0.0 + 2, text: $0.1, speaker: $0.2) }, language: "en")]
     }
 
-    @Test func noRemoteSpeechMeansAFewWordsAtMost() {
+    @Test func noRemoteSpeechMeansAFewWordsAndSecondsAtMost() {
         #expect(TranscriptBuilder.hasNoRemoteSpeech([]))
         #expect(TranscriptBuilder.hasNoRemoteSpeech(Self.result([(0, "Thank you.", nil)])))
         #expect(!TranscriptBuilder.hasNoRemoteSpeech(Self.result([(0, "Can everyone hear me, I think my camera is off", nil)])))
+        // Few words but a lot of speech time: someone was there.
+        let long = [STTResult(segments: [STTSegment(start: 0, end: 6, text: "Yes. Agreed. Fine.", speaker: nil)], language: "en")]
+        #expect(!TranscriptBuilder.hasNoRemoteSpeech(long))
+    }
+
+    @Test func oneCloudVoiceStaysMeAndSystemFragmentsAreNotAPerson() {
+        var meta = RecordingMeta(title: "t", started_at: Date(), device: AppInfo.device, client_version: AppInfo.version)
+        meta.attendees = [Attendee(name: "Anna Berg", email: "anna@example.com")]
+        // The cloud model labels even a single voice "A".
+        let solo = TranscriptBuilder.build(meta: meta, micResults: Self.result([(0, "Notes to self about the offsite agenda.", "A")]),
+                                           systemResults: Self.result([(5, "Battery is low.", nil)]), roomOnMic: true)
+        #expect(solo.segments.map(\.speaker).contains("Me"))
+        #expect(!solo.segments.map(\.speaker).contains("Speaker (A)"))
+        #expect(!solo.segments.map(\.speaker).contains("Anna Berg"))
+        #expect(solo.segments.map(\.speaker).contains("System audio"))
     }
 
     @Test func roomVoicesOnTheMicGetSpeakerLabels() {

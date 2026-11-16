@@ -47,22 +47,37 @@ enum TranscriptBuilder {
         return (Float(max(0, -offset)), Float(max(0, offset)))
     }
 
-    /// Fewer words than this on the system track means nothing came in
-    /// from a call (a notification sound or a stray hallucination is a few
-    /// words; any real remote speaker says more).
+    /// Below both of these on the system track, nothing came in from a
+    /// call: a notification or a stray hallucination is a few words and a
+    /// second or two; a remote participant who says anything at all in a
+    /// meeting passes either.
     static let remoteSpeechWords = 8
+    static let remoteSpeechSeconds: Float = 5
 
-    /// Whether the system track carried no remote speech: the recording was
-    /// an in-room meeting and everyone is on the mic.
+    /// Whether the system track carried no remote speech, so the recording
+    /// was an in-room meeting and everyone is on the mic. Only asked when
+    /// the system track was captured and its writer never failed: a missing
+    /// or broken track says nothing about the meeting.
     static func hasNoRemoteSpeech(_ systemResults: [STTResult]) -> Bool {
-        let words = systemResults.reduce(0) { total, result in
-            total + result.segments.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+        var words = 0
+        var seconds: Float = 0
+        for segment in systemResults.flatMap(\.segments) {
+            words += segment.text.split(whereSeparator: \.isWhitespace).count
+            seconds += max(0, segment.end - segment.start)
         }
-        return words < remoteSpeechWords
+        return words < remoteSpeechWords && seconds < remoteSpeechSeconds
+    }
+
+    /// The speaker ids an in-room mic carries; labels need at least two
+    /// (one voice is the operator, "Me"), whichever engine set them.
+    static func distinctSpeakers(_ results: [STTResult]) -> Set<String> {
+        Set(results.flatMap(\.segments).compactMap { $0.speaker?.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
     }
 
     /// `roomOnMic`: an in-room meeting, so the mic carries several people;
-    /// its diarized segments are labelled "Speaker (A)" etc. instead of "Me".
+    /// its diarized segments are labelled "Speaker (A)" etc. instead of "Me"
+    /// (when at least two voices were found), and the few words the system
+    /// track had (a notification, not a person) are "System audio".
     static func build(
         meta: RecordingMeta,
         micResults: [STTResult],
@@ -82,11 +97,12 @@ enum TranscriptBuilder {
         }
 
         let shifts = Self.streamShifts(meta)
+        let roomVoices = roomOnMic && Self.distinctSpeakers(micResults).count >= 2
         var all: [Labeled] = []
         for result in micResults {
             for segment in result.segments {
                 var speaker = "Me"
-                if roomOnMic, let id = segment.speaker?.trimmingCharacters(in: .whitespaces), !id.isEmpty {
+                if roomVoices, let id = segment.speaker?.trimmingCharacters(in: .whitespaces), !id.isEmpty {
                     speaker = "Speaker (\(id))"
                 }
                 all.append(
@@ -114,7 +130,9 @@ enum TranscriptBuilder {
                 // be chunked (>15 min) the same letter across chunks isn't
                 // guaranteed to be the same person.
                 let speaker: String
-                if let themName, !meta.isSingleStream {
+                if roomOnMic {
+                    speaker = "System audio"
+                } else if let themName, !meta.isSingleStream {
                     speaker = themName
                 } else if let id = segment.speaker?.trimmingCharacters(in: .whitespaces), !id.isEmpty {
                     speaker = "\(systemLabel) (\(id))"

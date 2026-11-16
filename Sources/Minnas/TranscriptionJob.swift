@@ -62,7 +62,9 @@ enum TranscriptionJob {
             && (meta.isSingleStream || TranscriptBuilder.soleOtherAttendeeName(meta.attendees) == nil)
         // Progress budget: the diarization pass is fast next to STT, so it
         // takes the last tenth when it runs.
-        let sttShare = diarize ? 0.9 : 1.0
+        // (An in-room meeting may diarize the mic instead, so the share is
+        // kept whenever the local diarizer can run.)
+        let sttShare = Config.diarizationEnabled() && model.engine == .whisperKit ? 0.9 : 1.0
 
         // An imported voice memo or file is a single stream stored in the
         // system slot (there is no "mic" side — everyone is in it). Skip
@@ -165,16 +167,20 @@ enum TranscriptionJob {
                 { @Sendable f in cb(hasMic ? (0.5 + f * 0.5) * sttShare : f * sttShare) }
             }
         )
-        if diarize && !duplicate && !systemResults.isEmpty {
-            systemResults = await labelSpeakers(systemResults, audio: systemAudio, onProgress: progress.map { cb in { @Sendable f in cb(sttShare + f * (1 - sttShare)) } })
-        }
-        // An in-room meeting: nothing came in from a call (no speech on the
-        // system track), so everyone in the room is on the mic. Its voices
-        // are separated then and labelled like an import's; with one voice
-        // the track stays "Me". The cloud model diarizes every stream itself.
-        let roomOnMic = hasMic && !duplicate && TranscriptBuilder.hasNoRemoteSpeech(systemResults)
-        if roomOnMic, Config.diarizationEnabled(), model.engine == .whisperKit, !micResults.isEmpty {
-            micResults = await labelSpeakers(micResults, audio: micForSTT, onProgress: nil)
+        // An in-room meeting: the system track was captured fine but carried
+        // no remote speech, so everyone in the room is on the mic. Then the
+        // mic is diarized instead of the system track and its voices are
+        // labelled like an import's; with one voice it stays "Me". The cloud
+        // model diarizes every stream itself.
+        let systemHealthy = hasSystem && meta.capture_health?.system_writer_failed != true
+        let roomOnMic = hasMic && systemHealthy && !duplicate && TranscriptBuilder.hasNoRemoteSpeech(systemResults)
+        let diarizeProgress = progress.map { cb in { @Sendable (f: Double) in cb(sttShare + f * (1 - sttShare)) } }
+        if roomOnMic {
+            if Config.diarizationEnabled(), model.engine == .whisperKit, !micResults.isEmpty {
+                micResults = await labelSpeakers(micResults, audio: micForSTT, onProgress: diarizeProgress)
+            }
+        } else if diarize && !duplicate && !systemResults.isEmpty {
+            systemResults = await labelSpeakers(systemResults, audio: systemAudio, onProgress: diarizeProgress)
         }
         if roomOnMic {
             jobLog.notice("\(slot.slug, privacy: .public): no speech on the system track; the mic's voices are separated as an in-room meeting")
