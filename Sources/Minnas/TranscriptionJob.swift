@@ -153,7 +153,7 @@ enum TranscriptionJob {
         let policy = LanguagePolicy.current(attendees: meta.attendees)
         let start = (try? await Transcriber.shared.resolveLanguage(forStreams: streams, model: model, policy: policy)) ?? nil
 
-        let micResults: [STTResult] = hasMic ? try await Transcriber.shared.transcribe(
+        var micResults: [STTResult] = hasMic ? try await Transcriber.shared.transcribe(
             audioPath: micForSTT.path, model: model, language: pinned, startLanguage: start, policy: policy,
             onProgress: progress.map { cb in
                 { @Sendable f in cb(hasSystem && !duplicate ? f * 0.5 * sttShare : f) }
@@ -168,10 +168,22 @@ enum TranscriptionJob {
         if diarize && !duplicate && !systemResults.isEmpty {
             systemResults = await labelSpeakers(systemResults, audio: systemAudio, onProgress: progress.map { cb in { @Sendable f in cb(sttShare + f * (1 - sttShare)) } })
         }
+        // An in-room meeting: nothing came in from a call (no speech on the
+        // system track), so everyone in the room is on the mic. Its voices
+        // are separated then and labelled like an import's; with one voice
+        // the track stays "Me". The cloud model diarizes every stream itself.
+        let roomOnMic = hasMic && !duplicate && TranscriptBuilder.hasNoRemoteSpeech(systemResults)
+        if roomOnMic, Config.diarizationEnabled(), model.engine == .whisperKit, !micResults.isEmpty {
+            micResults = await labelSpeakers(micResults, audio: micForSTT, onProgress: nil)
+        }
+        if roomOnMic {
+            jobLog.notice("\(slot.slug, privacy: .public): no speech on the system track; the mic's voices are separated as an in-room meeting")
+        }
 
         return try finish(
             slot: slot, meta: meta, micResults: micResults, systemResults: systemResults,
-            provenance: TranscriptionProvenance(engine: model.engine.rawValue, model: model.rawValue, transcribed_at: Date())
+            provenance: TranscriptionProvenance(engine: model.engine.rawValue, model: model.rawValue, transcribed_at: Date()),
+            roomOnMic: roomOnMic
         )
     }
 
@@ -202,14 +214,15 @@ enum TranscriptionJob {
         meta: RecordingMeta,
         micResults: [STTResult],
         systemResults: [STTResult],
-        provenance: TranscriptionProvenance
+        provenance: TranscriptionProvenance,
+        roomOnMic: Bool = false
     ) throws -> TranscriptBuilder.Output {
         // Imports and slots made by older code may carry an un-normalised
         // title; the transcript's heading, frontmatter and the folder file
         // name all come from it, so bound it here too.
         var meta = meta
         meta.title = Outbox.normalizeTitle(meta.title)
-        let output = TranscriptBuilder.build(meta: meta, micResults: micResults, systemResults: systemResults)
+        let output = TranscriptBuilder.build(meta: meta, micResults: micResults, systemResults: systemResults, roomOnMic: roomOnMic)
         // Segment sanity check before anything is written: a NaN, negative or
         // reversed timestamp means the engine returned garbage, and a
         // transcript ordered by it would be nonsense. The audio stays, so

@@ -454,3 +454,31 @@ import Testing
         #expect(old.segments.map(\.speaker) == ["Them", "Me"])
     }
 }
+
+/// In-room meetings: no speech came in from a call, so the mic carries the
+/// whole room and its diarized voices are labelled like an import's.
+@Suite struct InRoomTests {
+    static func result(_ texts: [(Float, String, String?)]) -> [STTResult] {
+        [STTResult(segments: texts.map { STTSegment(start: $0.0, end: $0.0 + 2, text: $0.1, speaker: $0.2) }, language: "en")]
+    }
+
+    @Test func noRemoteSpeechMeansAFewWordsAtMost() {
+        #expect(TranscriptBuilder.hasNoRemoteSpeech([]))
+        #expect(TranscriptBuilder.hasNoRemoteSpeech(Self.result([(0, "Thank you.", nil)])))
+        #expect(!TranscriptBuilder.hasNoRemoteSpeech(Self.result([(0, "Can everyone hear me, I think my camera is off", nil)])))
+    }
+
+    @Test func roomVoicesOnTheMicGetSpeakerLabels() {
+        let meta = RecordingMeta(title: "t", started_at: Date(), device: AppInfo.device, client_version: AppInfo.version)
+        let mic = Self.result([(0, "Let's look at the budget for next year first.", "A"),
+                               (3, "Fine, but marketing wants another hire in March.", "B")])
+        let room = TranscriptBuilder.build(meta: meta, micResults: mic, systemResults: [], roomOnMic: true)
+        #expect(room.segments.map(\.speaker) == ["Speaker (A)", "Speaker (B)"])
+        // On a call the mic is you, whatever a diarizer said.
+        let call = TranscriptBuilder.build(meta: meta, micResults: mic, systemResults: [], roomOnMic: false)
+        #expect(call.segments.map(\.speaker) == ["Me", "Me"])
+        // One voice in the room: no letters, so it stays "Me".
+        let solo = TranscriptBuilder.build(meta: meta, micResults: Self.result([(0, "Notes to self about the offsite agenda.", nil)]), systemResults: [], roomOnMic: true)
+        #expect(solo.segments.map(\.speaker) == ["Me"])
+    }
+}

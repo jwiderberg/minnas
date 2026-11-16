@@ -24,7 +24,6 @@ import Testing
     diarizeEnabled|settings.diarizeEnabled|DIARIZE|bool
     echoCancellationEnabled|settings.echoCancellationEnabled|ECHO_CANCEL|bool
     voiceMemoUsesAppleTranscript|settings.voiceMemoUsesAppleTranscript|VOICE_MEMO_TRANSCRIPT|bool
-    micVoiceProcessingMode|settings.micVoiceProcessingMode|MIC_VOICE_PROCESSING|choice(auto,on,off)
     dedupeStreams|settings.dedupeStreams|STT_DEDUPE_STREAMS|bool
     ownerEmail|settings.ownerEmail|OWNER_EMAIL|email
     onboardingCompleted|settings.onboardingCompleted|-|bool
@@ -61,7 +60,7 @@ import Testing
     @Test func defaultDisplayIsFrozen() {
         let golden = [
             "(off)", "30", "10", "large-v3", "auto", "en", "0.2", "false", "off",
-            "(none)", "taps", "true", "true", "false", "off", "false", "(unset)",
+            "(none)", "taps", "true", "true", "false", "false", "(unset)",
             "false", "(unset)",
         ]
         #expect(SettingKey.allCases.map(Self.defaultDisplay) == golden)
@@ -85,9 +84,6 @@ import Testing
         #expect(Setting.voiceMemoUsesAppleTranscript.parse("apple") == true)
         #expect(Setting.voiceMemoUsesAppleTranscript.parse("whisper") == false)
         #expect(Setting.voiceMemoUsesAppleTranscript.parse("TRUE") == true)
-        #expect(Setting.micVoiceProcessingMode.parse("yes") == .on)
-        #expect(Setting.micVoiceProcessingMode.parse("no") == .off)
-        #expect(Setting.micVoiceProcessingMode.parse("x") == nil)
         #expect(Setting.sttLanguage.parse("DE") == "de")
         #expect(Setting.sttLanguage.parse("auto") == "auto")
         #expect(Setting.sttLanguage.parse("xyz1") == nil)
@@ -132,12 +128,6 @@ import Testing
     @Test func voiceMemoTranscript() {
         #expect(with("VOICE_MEMO_TRANSCRIPT", "apple", Config.voiceMemoUsesAppleTranscript) == true)
         #expect(with("VOICE_MEMO_TRANSCRIPT", "whisper", Config.voiceMemoUsesAppleTranscript) == false)
-    }
-
-    @Test func micVoiceProcessing() {
-        #expect(with("MIC_VOICE_PROCESSING", "yes", Config.micVoiceProcessingMode) == .on)
-        #expect(with("MIC_VOICE_PROCESSING", "no", Config.micVoiceProcessingMode) == .off)
-        #expect(with("MIC_VOICE_PROCESSING", "x", Config.micVoiceProcessingMode) == .off)
     }
 
     @Test func sttLanguage() {

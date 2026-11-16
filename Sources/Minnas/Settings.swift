@@ -75,7 +75,6 @@ enum SettingKey: String, CaseIterable, Sendable {
     case diarizeEnabled
     case echoCancellationEnabled
     case voiceMemoUsesAppleTranscript
-    case micVoiceProcessingMode
     case dedupeStreams
     case ownerEmail
     case onboardingCompleted
@@ -103,7 +102,6 @@ enum SettingKey: String, CaseIterable, Sendable {
         case .diarizeEnabled: return AnySettingSpec(Setting.diarizeEnabled)
         case .echoCancellationEnabled: return AnySettingSpec(Setting.echoCancellationEnabled)
         case .voiceMemoUsesAppleTranscript: return AnySettingSpec(Setting.voiceMemoUsesAppleTranscript)
-        case .micVoiceProcessingMode: return AnySettingSpec(Setting.micVoiceProcessingMode)
         case .dedupeStreams: return AnySettingSpec(Setting.dedupeStreams)
         case .ownerEmail: return AnySettingSpec(Setting.ownerEmail)
         case .onboardingCompleted: return AnySettingSpec(Setting.onboardingCompleted)
@@ -312,11 +310,6 @@ enum Setting {
         .voiceMemoUsesAppleTranscript, env: "VOICE_MEMO_TRANSCRIPT", default: false,
         alsoTrue: ["apple"], alsoFalse: ["whisper"],
         "Keep the iPhone's own transcript for imported Voice Memos instead of the default model.")
-    /// Takes the bool spellings MIC_VOICE_PROCESSING always has.
-    static let micVoiceProcessingMode: SettingSpec<Config.VoiceProcessingMode> = .choice(
-        .micVoiceProcessingMode, env: "MIC_VOICE_PROCESSING", default: .off,
-        synonyms: Dictionary(uniqueKeysWithValues: trueTokens.map { ($0, .on) } + falseTokens.map { ($0, .off) }),
-        "Mic echo cancellation: off (default), auto (built-in speakers + non-Bluetooth mic only) or on. On, it makes the mic far quieter for the call app.")
     static let dedupeStreams: SettingSpec<Bool> = .bool(
         .dedupeStreams, env: "STT_DEDUPE_STREAMS", default: false,
         "Transcribe only the mic when both streams are near-duplicates (loses Me/Them).")

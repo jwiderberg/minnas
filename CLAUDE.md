@@ -124,19 +124,19 @@ of a meeting while the menubar keeps saying "recording". The rules:
   10 Hz recording tick (engine not running, or no buffer for the stall
   threshold → re-attach).
   The re-attach pads the mic file with silence for the dead stretch so it
-  stays time-aligned with the system track, re-decides AEC for the new route,
-  and resamples if the new input runs at another rate.
+  stays time-aligned with the system track, and resamples if the new input
+  runs at another rate.
 - The stall threshold and restart bookkeeping come from `RestartBackoff`
   (CaptureSupport.swift) in all three engines: 3 s, doubling per restart that
   never delivered a buffer, capped at 60 s; batches of 20 attempts, 1 s
   apart. Each engine keeps its own restart loop inline, because the loops'
   guards differ.
-- **Mic echo cancellation is off by default; keep it off.** macOS voice
-  processing on an input device attenuates that device for every other
-  app reading it (measured on the built-in mic: −60.7 dB mean with the
-  recorder's voice processing on, against −17.6 dB without), so the
-  people on the call can barely hear you. `MIC_VOICE_PROCESSING` defaults
-  to `off`; `auto` and `on` are opt-in and cost the call app's mic.
+- **Never enable voice processing on the mic.** macOS voice processing
+  works on the input device and attenuates it for every other app reading
+  it (measured on the built-in mic: −60.7 dB mean with the recorder's
+  voice processing on, against −17.6 dB without), so the people on the
+  call can barely hear you. Echo is removed after the call instead
+  ("Echo cancellation" below).
 - The tap block is built in a `nonisolated static func`. A closure formed
   inside a `@MainActor` method inherits main-actor isolation and SIGTRAPs on
   the audio thread (`dispatch_assert_queue`). Don't inline it.
@@ -301,8 +301,8 @@ of a meeting while the menubar keeps saying "recording". The rules:
   `Date.epochBits` (a Date published through one `Atomic<UInt64>`),
   `HostClock` (mach ticks per second), `CaptureSignal.epsilon` (the signal
   threshold). `CoreAudioHAL.swift`: the Core Audio property helpers used by
-  the taps engine and `AudioRoute`. `AudioRoute` fails closed: any HAL
-  failure → nil → AEC off (AEC over Bluetooth silences the mic).
+  the taps engine and `AudioRoute` (the default devices, for logs and
+  harnesses; any HAL failure → nil).
 - **UI:** `SettingsWindow` (General / Transcription / Cloud / Calendar /
   Permissions; AppKit; every control writes through `Settings.shared`),
   `Onboarding` (4 steps on first launch, `settings.onboardingCompleted`;
@@ -348,6 +348,14 @@ the bundle on every build. Don't edit the built copy.
   ad-hoc and prints a warning. Re-running the setup script is a no-op.
 - If a grant seems stuck (System Settings still lists an old signature),
   remove the entry with the `–` button and grant it again on next launch.
+
+## In-room meetings
+
+When the system track carries no remote speech (fewer than 8 words,
+`TranscriptBuilder.hasNoRemoteSpeech`), the meeting happened in the room and
+everyone is on the mic: the mic track is diarized and its voices are
+labelled "Speaker (A)/(B)" like an import's (one voice found → "Me"). On a
+call the mic is always "Me".
 
 ## Echo cancellation (after the call, never live)
 

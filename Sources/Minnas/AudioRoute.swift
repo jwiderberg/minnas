@@ -1,15 +1,8 @@
 //
-// Queries the current default audio devices' transport types, so the mic's
-// echo cancellation can be enabled only when it both helps and works:
-//   - helps:  output is the built-in SPEAKERS (audible in the room → the
-//             mic picks it up → bleed worth cancelling). Headphones (any
-//             transport) play into your ears → no bleed → AEC pointless.
-//   - works:  the mic is NOT Bluetooth. AVAudioEngine voice processing over
-//             a BT input captures pure silence (macOS VPIO+BT bug).
-//
-// Unknown/failed lookups conservatively report "not built-in speakers" /
-// "is bluetooth-ish" so AEC stays off — a missed AEC is harmless; a wrong
-// AEC silences the mic.
+// The current default audio devices, for the mic's logs and the harnesses:
+// the input's name (and whether it looks likely to capture silence) and
+// whether the output is the built-in speakers. Unknown or failed lookups
+// report "not built-in speakers".
 //
 
 import CoreAudio
@@ -20,11 +13,6 @@ enum AudioRoute {
     /// that the mic can pick up).
     static func defaultOutputIsBuiltInSpeakers() -> Bool {
         transportType(input: false) == kAudioDeviceTransportTypeBuiltIn
-    }
-
-    /// True when the default input is a Bluetooth device (VPIO breaks on it).
-    static func defaultInputIsBluetooth() -> Bool {
-        transportType(input: true) == kAudioDeviceTransportTypeBluetooth
     }
 
     /// Human-readable name of the current default input device (e.g.
@@ -48,7 +36,7 @@ enum AudioRoute {
     }
 
     // Both lookups map any failure to nil (`try?`), and nil equals no
-    // transport type, which is what keeps AEC off on an unknown route. The
+    // transport type, so an unknown route is "not built-in speakers". The
     // `as` pins the generic to the plain integer type: an inferred Optional
     // would ask the HAL for a 5-byte value.
 

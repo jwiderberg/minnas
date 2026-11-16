@@ -67,7 +67,9 @@ all your transcriptions, regardless of platform, local and in an open format
 - Your microphone and the other participants are recorded and transcribed as
   separate tracks, so the transcript always knows which side is "Me" and
   which is "Them". When several people speak on the far side it's split
-  further into "Them (A)", "Them (B)" and so on.
+  further into "Them (A)", "Them (B)" and so on. A meeting held in the room,
+  with no call, has everyone on the microphone; then the microphone's voices
+  are split into "Speaker (A)", "Speaker (B)" instead.
 - When the call plays on the Mac's speakers, your microphone hears the other
   side too. Before transcribing, the recorder removes their voice from your
   track with WebRTC's echo canceller (the one in Chrome and Meet), using the

@@ -47,10 +47,27 @@ enum TranscriptBuilder {
         return (Float(max(0, -offset)), Float(max(0, offset)))
     }
 
+    /// Fewer words than this on the system track means nothing came in
+    /// from a call (a notification sound or a stray hallucination is a few
+    /// words; any real remote speaker says more).
+    static let remoteSpeechWords = 8
+
+    /// Whether the system track carried no remote speech: the recording was
+    /// an in-room meeting and everyone is on the mic.
+    static func hasNoRemoteSpeech(_ systemResults: [STTResult]) -> Bool {
+        let words = systemResults.reduce(0) { total, result in
+            total + result.segments.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+        }
+        return words < remoteSpeechWords
+    }
+
+    /// `roomOnMic`: an in-room meeting, so the mic carries several people;
+    /// its diarized segments are labelled "Speaker (A)" etc. instead of "Me".
     static func build(
         meta: RecordingMeta,
         micResults: [STTResult],
-        systemResults: [STTResult]
+        systemResults: [STTResult],
+        roomOnMic: Bool = false
     ) -> Output {
         // A phone voice memo or an imported file is one stream with everyone
         // in it — "Them" would be wrong (it includes the operator), so label
@@ -68,9 +85,13 @@ enum TranscriptBuilder {
         var all: [Labeled] = []
         for result in micResults {
             for segment in result.segments {
+                var speaker = "Me"
+                if roomOnMic, let id = segment.speaker?.trimmingCharacters(in: .whitespaces), !id.isEmpty {
+                    speaker = "Speaker (\(id))"
+                }
                 all.append(
                     Labeled(
-                        speaker: "Me",
+                        speaker: speaker,
                         start: segment.start + shifts.mic,
                         end: segment.end + shifts.mic,
                         text: segment.text,

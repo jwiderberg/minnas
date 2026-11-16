@@ -119,27 +119,6 @@ enum Config {
     /// STT_LANGUAGE_MARGIN, default 0.2; 0 disables.
     static func sttLanguageMargin() -> Float { get(Setting.sttLanguageMargin) }
 
-    enum VoiceProcessingMode: String, Sendable, CaseIterable { case auto, on, off }
-
-    /// Mic acoustic echo cancellation mode (MIC_VOICE_PROCESSING).
-    /// - off (default): never (raw mic). Voice processing on a device
-    ///   attenuates that device for every other app reading it, by about
-    ///   43 dB on the built-in mic, so the call app sends near-silence.
-    /// - on: always (also risky over Bluetooth — silences the mic).
-    /// - auto: only on built-in speakers output (room bleed) with a
-    ///   non-Bluetooth mic. Same cost to the call app as on.
-    static func micVoiceProcessingMode() -> VoiceProcessingMode { get(Setting.micVoiceProcessingMode) }
-
-    /// Whether to enable AEC for the current audio route, per the mode.
-    static func shouldEnableMicVoiceProcessing() -> Bool {
-        switch micVoiceProcessingMode() {
-        case .on: return true
-        case .off: return false
-        case .auto:
-            return AudioRoute.defaultOutputIsBuiltInSpeakers() && !AudioRoute.defaultInputIsBluetooth()
-        }
-    }
-
     /// Whether to skip transcribing the system stream when it's a near-
     /// duplicate of the mic (recording on speakers, where the mic catches
     /// everything acoustically). **Default OFF.** It only ever fires on

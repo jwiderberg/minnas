@@ -12,16 +12,15 @@
 //
 // Route changes: AVAudioEngine STOPS itself whenever the audio hardware
 // configuration changes under it — plugging in AirPods, the default
-// output switching, the voice-processing aggregate device being torn
-// down — and posts AVAudioEngineConfigurationChange. It never restarts on
-// its own. Unhandled, that silently kills the mic track when headphones
-// connect (default output changed → VPIO aggregate torn down → engine
-// stopped) while the app keeps showing "recording"; see CLAUDE.md.
+// output switching — and posts AVAudioEngineConfigurationChange. It never
+// restarts on its own. Unhandled, that silently kills the mic track when
+// headphones connect (default output changed → engine stopped) while the
+// app keeps showing "recording"; see CLAUDE.md.
 // So: on that notification, and from a watchdog that notices the engine
 // not running / not delivering buffers, the tap is torn down and
 // re-attached. The gap is padded with silence so the mic track stays
-// time-aligned with the system track, and the AEC decision is re-made
-// for the new route (headphones in → no bleed → AEC off). The stall
+// time-aligned with the system track, and resampled when the new input
+// runs at another rate. The stall
 // threshold and the restart batch size come from RestartBackoff
 // (CaptureSupport.swift), shared with the system-audio engines.
 //
@@ -472,38 +471,10 @@ final class MicCapture: @unchecked Sendable {
         let input = engine.inputNode
         micLog.notice("attach (\(reason, privacy: .public)): default input device: \(AudioRoute.defaultInputDeviceName() ?? "unknown", privacy: .public) risky=\(AudioRoute.defaultInputLooksRisky(), privacy: .public)")
 
-        // Acoustic echo cancellation, per Config (default off: voice
-        // processing on the input device makes that device far quieter for
-        // every other app reading it, so the call hears almost nothing;
-        // "auto" enables it only on built-in-speaker output with a
-        // non-Bluetooth mic, since VPIO over Bluetooth captures pure
-        // silence). Must be set before
-        // reading the input format (voice processing can change it), and
-        // re-decided on every attach because the route may have changed.
-        // Best-effort: fall back to the current state if the OS refuses.
-        let wantVoiceProcessing = Config.shouldEnableMicVoiceProcessing()
-        if input.isVoiceProcessingEnabled != wantVoiceProcessing {
-            do {
-                try input.setVoiceProcessingEnabled(wantVoiceProcessing)
-                if wantVoiceProcessing {
-                    // Voice processing makes macOS DUCK every other app's
-                    // audio by default — on a call that turns the remote side
-                    // down for the user and for our system-audio track (peak
-                    // 0.03 vs 0.82 with AEC off). We only want the echo
-                    // cancellation, so ask for the minimum ducking and no
-                    // dynamic ("advanced") ducking.
-                    input.voiceProcessingOtherAudioDuckingConfiguration =
-                        AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
-                            enableAdvancedDucking: false,
-                            duckingLevel: .min
-                        )
-                }
-                micLog.notice("voice processing (AEC) \(wantVoiceProcessing ? "enabled, other-audio ducking=min" : "disabled", privacy: .public)")
-            } catch {
-                micLog.error("voice processing set(\(wantVoiceProcessing, privacy: .public)) failed, keeping \(input.isVoiceProcessingEnabled, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
+        // No voice processing (setVoiceProcessingEnabled) here, ever: on
+        // macOS it processes the input DEVICE, not this app's copy, and made
+        // the built-in mic ~43 dB quieter for the call app (2026-11-16).
+        // Echo from speakers is removed after the call (EchoCanceller).
         let format = input.inputFormat(forBus: 0)
         micLog.notice("input format: sampleRate=\(format.sampleRate, privacy: .public) channels=\(format.channelCount, privacy: .public) commonFormat=\(format.commonFormat.rawValue, privacy: .public)")
         if format.sampleRate == 0 || format.channelCount == 0 {
@@ -521,13 +492,13 @@ final class MicCapture: @unchecked Sendable {
         // input (which silently writes zeros on Tahoe in some
         // configurations).
         //
-        // Why mono: with voice processing (AEC) on, the input node reports a
-        // multi-channel format (7 identical channels seen with a USB mic on
-        // built-in speakers). A 7-channel CAF has no channel layout the
-        // AppleM4A export understands, so the compressed copy came out
-        // SILENT and the raw file (~40 MB/min) had to be kept. A mic is one
-        // voice; channel 0 carries it (the same channel the silence stats
-        // read), so we write just that.
+        // Why mono: some inputs report a multi-channel format (voice
+        // processing used to give 7 identical channels; aggregate and
+        // interface devices still do). A many-channel CAF has no channel
+        // layout the AppleM4A export understands, so the compressed copy came
+        // out SILENT and the raw file (~40 MB/min) had to be kept. A mic is
+        // one voice; channel 0 carries it (the same channel the silence
+        // stats read), so we write just that.
         let audioFile: AVAudioFile
         if let existing = file {
             audioFile = existing
