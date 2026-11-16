@@ -82,6 +82,16 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
 
+# The vendored echo canceller's licences travel with the binary (BSD-3 and
+# Apache-2.0 both require it).
+UPSTREAM="Sources/CWebRTCAEC/upstream"
+LICENCES="$APP_DIR/Contents/Resources/Licences"
+mkdir -p "$LICENCES"
+cp "$UPSTREAM/webrtc-audio-processing/COPYING" "$LICENCES/webrtc-audio-processing-COPYING"
+cp "$UPSTREAM/webrtc-audio-processing/webrtc/LICENSE" "$LICENCES/WebRTC-LICENSE"
+cp "$UPSTREAM/webrtc-audio-processing/webrtc/PATENTS" "$LICENCES/WebRTC-PATENTS"
+cp "$UPSTREAM/abseil-cpp/LICENSE" "$LICENCES/abseil-cpp-LICENSE"
+
 # Refuse to ship FluidAudio's prebuilt NemoTextProcessing Rust library: the
 # Diarizer-only trait must keep it out, and an unauditable native blob has
 # no place in a process holding mic + screen + FDA grants. Checked BEFORE

@@ -95,8 +95,48 @@ enum TranscriptionJob {
         let hasSystem = fm.fileExists(atPath: systemAudio.path)
         let duplicate = hasMic && hasSystem
             && AudioDuplication.systemDuplicatesMic(mic: micAudio, system: systemAudio)
+
+        // On speakers the mic also hears the other side; the transcriber
+        // reads an echo-cancelled copy of the mic (temporary, the recording
+        // is untouched). A failure here transcribes the raw mic instead of
+        // failing the job. See EchoCanceller.
+        let cancelEcho = hasMic && hasSystem && !duplicate && Config.echoCancellationEnabled()
+        let echoShare = cancelEcho ? 0.05 : 0
+        let progress: (@Sendable (Double) -> Void)? = onProgress.map { cb in { @Sendable f in cb(echoShare + f * (1 - echoShare)) } }
+        var micForSTT = micAudio
+        var cleanedMic: URL?
+        defer { if let cleanedMic { try? fm.removeItem(at: cleanedMic) } }
+        if cancelEcho {
+            let out = fm.temporaryDirectory.appendingPathComponent("\(slot.slug)-mic-echo-cancelled-\(UUID().uuidString).caf")
+            let echoProgress: (@Sendable (Double) -> Void)? = onProgress.map { cb in { @Sendable f in cb(f * echoShare) } }
+            // Detached so the CPU-bound pass leaves the cooperative pool's
+            // other work alone; cancelling the job cancels it too.
+            let pass = Task.detached(priority: .utility) {
+                try EchoCanceller.cancel(mic: micAudio, reference: systemAudio, output: out,
+                                         startOffset: meta.capture_health?.system_start_offset_seconds,
+                                         onProgress: echoProgress)
+            }
+            do {
+                let outcome = try await withTaskCancellationHandler {
+                    try await pass.value
+                } onCancel: {
+                    pass.cancel()
+                }
+                if case .cancelled = outcome {
+                    micForSTT = out
+                    cleanedMic = out
+                }
+            } catch is CancellationError {
+                try? fm.removeItem(at: out)
+                throw CancellationError()
+            } catch {
+                try? fm.removeItem(at: out)
+                jobLog.error("\(slot.slug, privacy: .public): echo cancellation failed, transcribing the raw mic: \(String(describing: error), privacy: .public)")
+            }
+        }
+
         var streams: [URL] = []
-        if hasMic { streams.append(micAudio) }
+        if hasMic { streams.append(micForSTT) }
         if hasSystem && !duplicate { streams.append(systemAudio) }
         // Neither file: fail instead of writing an empty transcript over a
         // good one (reachable via --retranscribe on a slot whose audio was
@@ -114,19 +154,19 @@ enum TranscriptionJob {
         let start = (try? await Transcriber.shared.resolveLanguage(forStreams: streams, model: model, policy: policy)) ?? nil
 
         let micResults: [STTResult] = hasMic ? try await Transcriber.shared.transcribe(
-            audioPath: micAudio.path, model: model, language: pinned, startLanguage: start, policy: policy,
-            onProgress: onProgress.map { cb in
+            audioPath: micForSTT.path, model: model, language: pinned, startLanguage: start, policy: policy,
+            onProgress: progress.map { cb in
                 { @Sendable f in cb(hasSystem && !duplicate ? f * 0.5 * sttShare : f) }
             }
         ) : []
         var systemResults: [STTResult] = !hasSystem || duplicate ? [] : try await Transcriber.shared.transcribe(
             audioPath: systemAudio.path, model: model, language: pinned, startLanguage: start, policy: policy,
-            onProgress: onProgress.map { cb in
+            onProgress: progress.map { cb in
                 { @Sendable f in cb(hasMic ? (0.5 + f * 0.5) * sttShare : f * sttShare) }
             }
         )
         if diarize && !duplicate && !systemResults.isEmpty {
-            systemResults = await labelSpeakers(systemResults, audio: systemAudio, onProgress: onProgress.map { cb in { @Sendable f in cb(sttShare + f * (1 - sttShare)) } })
+            systemResults = await labelSpeakers(systemResults, audio: systemAudio, onProgress: progress.map { cb in { @Sendable f in cb(sttShare + f * (1 - sttShare)) } })
         }
 
         return try finish(

@@ -73,6 +73,7 @@ enum SettingKey: String, CaseIterable, Sendable {
     case systemAudioExcludedBundleIDs
     case systemAudioEngine
     case diarizeEnabled
+    case echoCancellationEnabled
     case voiceMemoUsesAppleTranscript
     case micVoiceProcessingMode
     case dedupeStreams
@@ -100,6 +101,7 @@ enum SettingKey: String, CaseIterable, Sendable {
         case .systemAudioExcludedBundleIDs: return AnySettingSpec(Setting.systemAudioExcludedBundleIDs)
         case .systemAudioEngine: return AnySettingSpec(Setting.systemAudioEngine)
         case .diarizeEnabled: return AnySettingSpec(Setting.diarizeEnabled)
+        case .echoCancellationEnabled: return AnySettingSpec(Setting.echoCancellationEnabled)
         case .voiceMemoUsesAppleTranscript: return AnySettingSpec(Setting.voiceMemoUsesAppleTranscript)
         case .micVoiceProcessingMode: return AnySettingSpec(Setting.micVoiceProcessingMode)
         case .dedupeStreams: return AnySettingSpec(Setting.dedupeStreams)
@@ -303,15 +305,18 @@ enum Setting {
     static let diarizeEnabled: SettingSpec<Bool> = .bool(
         .diarizeEnabled, env: "DIARIZE", default: true,
         "Split the \"Them\" stream into distinct speakers with the local diarizer.")
+    static let echoCancellationEnabled: SettingSpec<Bool> = .bool(
+        .echoCancellationEnabled, env: "ECHO_CANCEL", default: true,
+        "Remove the other side's voice from the mic track before transcribing (it leaks in when the call plays on speakers).")
     static let voiceMemoUsesAppleTranscript: SettingSpec<Bool> = .bool(
         .voiceMemoUsesAppleTranscript, env: "VOICE_MEMO_TRANSCRIPT", default: false,
         alsoTrue: ["apple"], alsoFalse: ["whisper"],
         "Keep the iPhone's own transcript for imported Voice Memos instead of the default model.")
     /// Takes the bool spellings MIC_VOICE_PROCESSING always has.
     static let micVoiceProcessingMode: SettingSpec<Config.VoiceProcessingMode> = .choice(
-        .micVoiceProcessingMode, env: "MIC_VOICE_PROCESSING", default: .auto,
+        .micVoiceProcessingMode, env: "MIC_VOICE_PROCESSING", default: .off,
         synonyms: Dictionary(uniqueKeysWithValues: trueTokens.map { ($0, .on) } + falseTokens.map { ($0, .off) }),
-        "Mic echo cancellation: auto (built-in speakers + non-Bluetooth mic only), on or off.")
+        "Mic echo cancellation: off (default), auto (built-in speakers + non-Bluetooth mic only) or on. On, it makes the mic far quieter for the call app.")
     static let dedupeStreams: SettingSpec<Bool> = .bool(
         .dedupeStreams, env: "STT_DEDUPE_STREAMS", default: false,
         "Transcribe only the mic when both streams are near-duplicates (loses Me/Them).")

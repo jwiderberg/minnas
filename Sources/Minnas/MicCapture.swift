@@ -83,6 +83,11 @@ final class TapStats: @unchecked Sendable {
     // insert silence between contiguous buffers whose nominal end runs
     // ahead of the callback. 0 = none yet.
     let lastNominalEndTicks = Atomic<UInt64>(0)
+    // Host time at which the file's first buffer starts: the mic track's
+    // t = 0 on the host clock. Written once, by the tap. 0 = none yet.
+    let firstStartTicks = Atomic<UInt64>(0)
+    // Tap thread only: the first buffer has been seen (written or not).
+    var firstBufferHandled = false
     var restarts: Int = 0
     // Restart pads (padGapWithSilence, main actor only).
     var paddedSeconds: Double = 0
@@ -181,6 +186,11 @@ final class MicCapture: @unchecked Sendable {
     var restartCount: Int { stats.restarts }
     var paddedSecondsTotal: Double { stats.paddedSeconds + stats.resumePaddedSeconds }
     var writeErrorCount: UInt64 { stats.writeErrors }
+    /// Host-clock seconds of the file's first sample; nil before it.
+    var fileStartHostSeconds: Double? {
+        let ticks = stats.firstStartTicks.load(ordering: .relaxed)
+        return ticks == 0 ? nil : Double(ticks) / clock.ticksPerSecond
+    }
     /// Seconds of audio the tap actually delivered (excluding padding).
     var secondsCaptured: Double {
         guard let rate = file?.processingFormat.sampleRate, rate > 0 else { return 0 }
@@ -462,10 +472,12 @@ final class MicCapture: @unchecked Sendable {
         let input = engine.inputNode
         micLog.notice("attach (\(reason, privacy: .public)): default input device: \(AudioRoute.defaultInputDeviceName() ?? "unknown", privacy: .public) risky=\(AudioRoute.defaultInputLooksRisky(), privacy: .public)")
 
-        // Acoustic echo cancellation. Enabled per Config (default "auto":
-        // only on built-in-speaker output with a non-Bluetooth mic, where it
-        // both helps — cancels room bleed for clean Me/Them — and works —
-        // VPIO over Bluetooth captures pure silence). Must be set before
+        // Acoustic echo cancellation, per Config (default off: voice
+        // processing on the input device makes that device far quieter for
+        // every other app reading it, so the call hears almost nothing;
+        // "auto" enables it only on built-in-speaker output with a
+        // non-Bluetooth mic, since VPIO over Bluetooth captures pure
+        // silence). Must be set before
         // reading the input format (voice processing can change it), and
         // re-decided on every attach because the route may have changed.
         // Best-effort: fall back to the current state if the OS refuses.
@@ -623,6 +635,8 @@ final class MicCapture: @unchecked Sendable {
                                          frames: buffer.frameLength, sampleRate: buffer.format.sampleRate,
                                          ticksPerSecond: clock.ticksPerSecond, fallback: clampedEnd),
                     ordering: .relaxed)
+                let firstOfFile = !stats.firstBufferHandled
+                stats.firstBufferHandled = true
                 // Buffers resumed after a gap with no restart in between (a
                 // restart pads up to its own instant and advances
                 // lastHostEndTicks): fill the gap before this buffer.
@@ -653,6 +667,11 @@ final class MicCapture: @unchecked Sendable {
                         toWrite = try Self.convert(toWrite, with: converter, to: fileFormat)
                     }
                     try audioFile.write(from: toWrite)
+                    // The file's sample 0 on the host clock, if the device
+                    // stamped it; otherwise unknown (never the callback time).
+                    if firstOfFile, when.isHostTimeValid, when.hostTime != 0 {
+                        stats.firstStartTicks.store(when.hostTime, ordering: .relaxed)
+                    }
                 } catch {
                     stats.writeErrors &+= 1
                     if stats.firstWriteError == nil {

@@ -122,12 +122,12 @@ enum Config {
     enum VoiceProcessingMode: String, Sendable, CaseIterable { case auto, on, off }
 
     /// Mic acoustic echo cancellation mode (MIC_VOICE_PROCESSING).
-    /// - off: never (raw mic).
-    /// - on: always (force; risky over Bluetooth — silences the mic).
-    /// - auto (default): enable only when it helps AND works — built-in
-    ///   speakers output (room bleed) with a non-Bluetooth mic. This keeps
-    ///   AEC off for Bluetooth/headset (no bleed, and VPIO+BT = silence) and
-    ///   on for speaker recordings (clean Me/Them).
+    /// - off (default): never (raw mic). Voice processing on a device
+    ///   attenuates that device for every other app reading it, by about
+    ///   43 dB on the built-in mic, so the call app sends near-silence.
+    /// - on: always (also risky over Bluetooth — silences the mic).
+    /// - auto: only on built-in speakers output (room bleed) with a
+    ///   non-Bluetooth mic. Same cost to the call app as on.
     static func micVoiceProcessingMode() -> VoiceProcessingMode { get(Setting.micVoiceProcessingMode) }
 
     /// Whether to enable AEC for the current audio route, per the mode.
@@ -176,6 +176,10 @@ enum Config {
     /// Whether the local engines diarize the "Them" stream (DIARIZE=off to
     /// disable). Default on. The cloud model diarizes on its own.
     static func diarizationEnabled() -> Bool { get(Setting.diarizeEnabled) }
+
+    /// Whether the mic track is echo-cancelled against the system track
+    /// before transcription (ECHO_CANCEL, default on). See EchoCanceller.
+    static func echoCancellationEnabled() -> Bool { get(Setting.echoCancellationEnabled) }
 
     /// Days to keep recordings on disk before pruning. 0 disables pruning.
     /// Default 30. A transcript still owed to the folder is never pruned,

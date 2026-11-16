@@ -42,6 +42,7 @@ final class CAFWriterStats: Sendable {
     private let droppedCount = Atomic<UInt64>(0)
     private let failed = Atomic<Bool>(false)
     private let timedOut = Atomic<Bool>(false)
+    private let sessionStartBits = Atomic<UInt64>(0)
 
     /// Seconds of silence written into gaps so far.
     var paddedSeconds: Double { Double(bitPattern: paddedBits.load(ordering: .relaxed)) }
@@ -51,6 +52,19 @@ final class CAFWriterStats: Sendable {
     var hasFailed: Bool { failed.load(ordering: .relaxed) }
     /// A finish missed its deadline and the writer was abandoned.
     var hasTimedOut: Bool { timedOut.load(ordering: .relaxed) }
+
+    /// Host-clock seconds of the file's t = 0; nil until the engine noted a
+    /// trustworthy one (a valid host timestamp on the first buffer). Lets
+    /// transcription place this track on the mic's timeline.
+    var fileStartHostSeconds: Double? {
+        let bits = sessionStartBits.load(ordering: .relaxed)
+        return bits == 0 ? nil : Double(bitPattern: bits)
+    }
+
+    func noteFileStart(hostSeconds seconds: Double) {
+        guard seconds.isFinite, seconds > 0 else { return }
+        sessionStartBits.store(seconds.bitPattern, ordering: .relaxed)
+    }
 
     /// Also set by an engine's own outer stop deadline.
     func markTimedOut() {

@@ -68,6 +68,13 @@ all your transcriptions, regardless of platform, local and in an open format
   separate tracks, so the transcript always knows which side is "Me" and
   which is "Them". When several people speak on the far side it's split
   further into "Them (A)", "Them (B)" and so on.
+- When the call plays on the Mac's speakers, your microphone hears the other
+  side too. Before transcribing, the recorder removes their voice from your
+  track with WebRTC's echo canceller (the one in Chrome and Meet), using the
+  recorded system audio as the reference. It runs on the saved files after
+  the call, so nothing touches your microphone while you talk, and the
+  recording itself is kept as it was. Turn it off under Settings ›
+  Transcription.
 - Each meeting becomes a Markdown file in a folder of your choice. A notes
   vault, a synced folder, wherever.
 - While WhisperKit provides excellent, fast transcription in many languages,
@@ -309,6 +316,10 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 
 ## Troubleshooting
 
+- The other side's words show up under "Me". The echo canceller found no
+  consistent echo, or it is switched off (Settings › Transcription). The
+  log line "echo cancelled" or "no echo of the system track" says which;
+  headphones avoid the problem altogether.
 - The other side is silent, or a track goes quiet after you plug in
   headphones. Switching output or input devices mid-call restarts the
   capture. Both tracks recover within a few seconds and the gap is padded
@@ -386,4 +397,7 @@ zip as a workflow artifact.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT. See `LICENSE`. The echo canceller in `Sources/CWebRTCAEC/upstream` is
+WebRTC's (BSD-3-Clause with a patent grant) with parts of abseil-cpp
+(Apache-2.0); their licences are in that folder and in the app bundle under
+`Contents/Resources/Licences`.

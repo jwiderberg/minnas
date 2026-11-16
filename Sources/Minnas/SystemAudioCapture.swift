@@ -127,6 +127,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
     /// The asset writer refused data — the file can't be recovered by a
     /// stream restart; the user has to stop and start a new recording.
     var hasWriterFailed: Bool { cafStats.hasFailed }
+    var fileStartHostSeconds: Double? { cafStats.fileStartHostSeconds }
 
     private let writeQueue: DispatchQueue
 
@@ -387,6 +388,13 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, Syst
 
         if !caf.sessionStarted {
             caf.startSession(atSourceTime: sampleBuffer.presentationTimeStamp, seedTimeline: false)
+            // ScreenCaptureKit stamps buffers on the stream's
+            // synchronization clock; the mic is on the host clock. Convert,
+            // and record nothing if the clock or the time is unavailable.
+            if let clock = stream.synchronizationClock {
+                let host = CMSyncConvertTime(sampleBuffer.presentationTimeStamp, from: clock, to: CMClockGetHostTimeClock())
+                if host.isNumeric { cafStats.noteFileStart(hostSeconds: host.seconds) }
+            }
         }
 
         lastBufferBits.store(Date().epochBits, ordering: .relaxed)

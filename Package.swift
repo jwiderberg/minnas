@@ -9,6 +9,20 @@
 //
 import PackageDescription
 
+// Build settings for the vendored WebRTC sources: the defines its own
+// build passes on macOS, the two include roots, and -O2 in debug builds
+// too (unoptimised, the canceller runs slower than realtime).
+let webrtcSettings: (c: [CSetting], cxx: [CXXSetting]) = {
+    let defines = [("WEBRTC_POSIX", "1"), ("WEBRTC_MAC", "1"), ("WEBRTC_APM_DEBUG_DUMP", "0")]
+    let roots = ["upstream/webrtc-audio-processing/webrtc", "upstream/abseil-cpp"]
+    return (
+        defines.map { CSetting.define($0.0, to: $0.1) } + roots.map { .headerSearchPath($0) }
+            + [.define("NDEBUG", .when(configuration: .release)), .unsafeFlags(["-O2"], .when(configuration: .debug))],
+        defines.map { CXXSetting.define($0.0, to: $0.1) } + roots.map { .headerSearchPath($0) }
+            + [.define("NDEBUG", .when(configuration: .release)), .unsafeFlags(["-O2"], .when(configuration: .debug))]
+    )
+}()
+
 let package = Package(
     name: "minnas",
     platforms: [
@@ -31,9 +45,28 @@ let package = Package(
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.18.2", traits: ["Diarizer"]),
     ],
     targets: [
+        // WebRTC's AEC3 echo canceller, vendored (Sources/CWebRTCAEC/upstream,
+        // see its README), behind a small C interface. It removes the far
+        // side's voice from the mic track of a speakers recording before
+        // transcription; the recording itself is never processed.
+        .target(
+            name: "CWebRTCAEC",
+            path: "Sources/CWebRTCAEC",
+            exclude: [
+                "upstream/MANIFEST",
+                "upstream/README.md",
+                "upstream/webrtc-audio-processing/COPYING",
+                "upstream/webrtc-audio-processing/webrtc/LICENSE",
+                "upstream/webrtc-audio-processing/webrtc/PATENTS",
+                "upstream/abseil-cpp/LICENSE",
+            ],
+            cSettings: webrtcSettings.c,
+            cxxSettings: webrtcSettings.cxx
+        ),
         .executableTarget(
             name: "Minnas",
             dependencies: [
+                "CWebRTCAEC",
                 .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
@@ -49,5 +82,6 @@ let package = Package(
             dependencies: ["Minnas"],
             path: "Tests/MinnasTests"
         ),
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

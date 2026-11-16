@@ -22,6 +22,7 @@ import Testing
     systemAudioExcludedBundleIDs|settings.systemAudioExcludedBundleIDs|SYSTEM_AUDIO_EXCLUDE_BUNDLES|list
     systemAudioEngine|settings.systemAudioEngine|SYSTEM_AUDIO_ENGINE|choice(taps,sck)
     diarizeEnabled|settings.diarizeEnabled|DIARIZE|bool
+    echoCancellationEnabled|settings.echoCancellationEnabled|ECHO_CANCEL|bool
     voiceMemoUsesAppleTranscript|settings.voiceMemoUsesAppleTranscript|VOICE_MEMO_TRANSCRIPT|bool
     micVoiceProcessingMode|settings.micVoiceProcessingMode|MIC_VOICE_PROCESSING|choice(auto,on,off)
     dedupeStreams|settings.dedupeStreams|STT_DEDUPE_STREAMS|bool
@@ -60,7 +61,7 @@ import Testing
     @Test func defaultDisplayIsFrozen() {
         let golden = [
             "(off)", "30", "10", "large-v3", "auto", "en", "0.2", "false", "off",
-            "(none)", "taps", "true", "false", "auto", "false", "(unset)",
+            "(none)", "taps", "true", "true", "false", "off", "false", "(unset)",
             "false", "(unset)",
         ]
         #expect(SettingKey.allCases.map(Self.defaultDisplay) == golden)
@@ -124,6 +125,8 @@ import Testing
     @Test func diarize() {
         #expect(with("DIARIZE", "off", Config.diarizationEnabled) == false)
         #expect(with("DIARIZE", "garbage", Config.diarizationEnabled) == true)
+        #expect(with("ECHO_CANCEL", "off", Config.echoCancellationEnabled) == false)
+        #expect(with("ECHO_CANCEL", "garbage", Config.echoCancellationEnabled) == true)
     }
 
     @Test func voiceMemoTranscript() {
@@ -134,7 +137,7 @@ import Testing
     @Test func micVoiceProcessing() {
         #expect(with("MIC_VOICE_PROCESSING", "yes", Config.micVoiceProcessingMode) == .on)
         #expect(with("MIC_VOICE_PROCESSING", "no", Config.micVoiceProcessingMode) == .off)
-        #expect(with("MIC_VOICE_PROCESSING", "x", Config.micVoiceProcessingMode) == .auto)
+        #expect(with("MIC_VOICE_PROCESSING", "x", Config.micVoiceProcessingMode) == .off)
     }
 
     @Test func sttLanguage() {

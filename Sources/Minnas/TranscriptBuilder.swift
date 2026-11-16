@@ -8,12 +8,13 @@
 // We interleave all segments by start time and group consecutive
 // same-speaker segments into one paragraph.
 //
-// Timestamp alignment caveat: each .caf has its own t=0. The mic stream
-// starts within milliseconds of session.start(); ScreenCaptureKit warms
-// up over ~0.5–7s before its first sample, so its t=0 is offset later.
-// That offset is not tracked, so the very first few segments of a meeting
-// may interleave in slightly the wrong order; the rest of the transcript
-// is unaffected.
+// Timestamps: each .caf has its own t=0. The mic stream starts within
+// milliseconds of session.start(); the system engine's file starts at its
+// first buffer (ScreenCaptureKit warms up ~0.5–7 s first). The recording
+// stores that offset (capture_health.system_start_offset_seconds) and the
+// system segments are moved by it onto the mic's timeline, so both sides
+// interleave correctly. Recordings made before it was stored keep their
+// own t=0s (the first few segments may interleave out of order).
 //
 
 import Foundation
@@ -38,6 +39,14 @@ enum TranscriptBuilder {
         let segments: [TranscriptSegment]
     }
 
+    /// How far each stream's segments move onto one timeline: the stream
+    /// that started later moves by the recorded offset, so no time is ever
+    /// negative (the offset can be slightly below 0 from clock jitter).
+    static func streamShifts(_ meta: RecordingMeta) -> (mic: Float, system: Float) {
+        guard !meta.isSingleStream, let offset = meta.capture_health?.system_start_offset_seconds else { return (0, 0) }
+        return (Float(max(0, -offset)), Float(max(0, offset)))
+    }
+
     static func build(
         meta: RecordingMeta,
         micResults: [STTResult],
@@ -55,14 +64,15 @@ enum TranscriptBuilder {
             let language: String
         }
 
+        let shifts = Self.streamShifts(meta)
         var all: [Labeled] = []
         for result in micResults {
             for segment in result.segments {
                 all.append(
                     Labeled(
                         speaker: "Me",
-                        start: segment.start,
-                        end: segment.end,
+                        start: segment.start + shifts.mic,
+                        end: segment.end + shifts.mic,
                         text: segment.text,
                         language: result.language
                     )
@@ -73,6 +83,7 @@ enum TranscriptBuilder {
         // system stream IS that person — name them instead of "Them" (no
         // voice-ID needed). Multi-person meetings keep "Them (A)".
         let themName = Self.soleOtherAttendeeName(meta.attendees)
+        let systemShift = shifts.system
         for result in systemResults {
             for segment in result.segments {
                 // The system stream is everyone-but-me. When the engine
@@ -92,8 +103,8 @@ enum TranscriptBuilder {
                 all.append(
                     Labeled(
                         speaker: speaker,
-                        start: segment.start,
-                        end: segment.end,
+                        start: segment.start + systemShift,
+                        end: segment.end + systemShift,
                         text: segment.text,
                         language: result.language
                     )

@@ -307,6 +307,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private let marginField = SettingsUI.numberField()
     private let marginMessage = SettingsUI.messageLabel()
     private let diarizeCheckbox = NSButton(checkboxWithTitle: "Separate the other speakers (local diarizer)", target: nil, action: nil)
+    private let echoCheckbox = NSButton(checkboxWithTitle: "Remove the other side's voice from my track (calls on speakers)", target: nil, action: nil)
     private let voiceMemoPopup = NSPopUpButton()
     private let excludedTable = NSTableView()
     private var excludedIDs: [String] = []
@@ -604,6 +605,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         diarizeCheckbox.target = self
         diarizeCheckbox.action = #selector(diarizeToggled)
         form.row("Speakers:", diarizeCheckbox)
+        echoCheckbox.target = self
+        echoCheckbox.action = #selector(echoToggled)
+        form.row("Echo:", echoCheckbox)
 
         voiceMemoPopup.addItems(withTitles: ["Transcribe with the default model", "Use the iPhone's own transcript"])
         voiceMemoPopup.target = self
@@ -651,6 +655,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         marginField.stringValue = String(format: "%g", Config.sttLanguageMargin())
         SettingsUI.show(marginMessage, info: SettingsUI.overrideNote(for: .sttLanguageMargin))
         diarizeCheckbox.state = Config.diarizationEnabled() ? .on : .off
+        echoCheckbox.state = Config.echoCancellationEnabled() ? .on : .off
         voiceMemoPopup.selectItem(at: Config.voiceMemoUsesAppleTranscript() ? 1 : 0)
         excludedIDs = Config.systemAudioExcludedBundleIDs()
         excludedTable.reloadData()
@@ -754,6 +759,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     @objc private func diarizeToggled() {
         Settings.shared.set(Setting.diarizeEnabled, diarizeCheckbox.state == .on)
+    }
+
+    @objc private func echoToggled() {
+        Settings.shared.set(Setting.echoCancellationEnabled, echoCheckbox.state == .on)
     }
 
     @objc private func voiceMemoChanged() {

@@ -162,6 +162,22 @@ struct CaptureHealth: Codable, Sendable {
     var system_buffers: Int
     var system_had_signal: Bool
     var system_writer_failed: Bool
+    /// How far into the mic track the system track's first sample falls
+    /// (seconds, from both engines' host clocks). Places the two tracks on
+    /// one timeline: the transcript's ordering and the echo canceller's
+    /// search window. nil for recordings made before it was recorded.
+    var system_start_offset_seconds: Double? = nil
+}
+
+extension CaptureHealth {
+    /// The system track's start on the mic track's timeline, if both are
+    /// known and plausible (the system engine starts after the mic, within
+    /// 20 s; anything else means a clock mix-up and is not trusted).
+    static func startOffset(mic: Double?, system: Double?) -> Double? {
+        guard let mic, let system else { return nil }
+        let offset = system - mic
+        return offset >= -0.5 && offset <= 20 ? offset : nil
+    }
 }
 
 extension RecordingMeta {

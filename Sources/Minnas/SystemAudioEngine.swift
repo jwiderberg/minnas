@@ -47,6 +47,8 @@ protocol SystemAudioEngine: AnyObject, Sendable {
     var paddedSecondsTotal: Double { get }
     /// The file writer refused data; a restart can't fix the file.
     var hasWriterFailed: Bool { get }
+    /// Host-clock seconds of the file's first sample; nil before it.
+    var fileStartHostSeconds: Double? { get }
     var restartCount: Int { get }
     /// When delivery stopped and hasn't come back; nil while healthy.
     var stalledSince: Date? { get }

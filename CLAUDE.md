@@ -19,7 +19,10 @@ Pipeline:
 2. Capture: `RecordingSession` runs `MicCapture` (AVAudioEngine) and a
    `SystemAudioEngine` (`SystemAudioTapCapture` or `SystemAudioCapture`) into
    `~/Library/Application Support/minnas/outbox/<slug>/`.
-3. `TranscriptionJob` → `Transcriber` (dispatches on `TranscriptionModel.engine`)
+3. `TranscriptionJob` → `EchoCanceller` (two-stream recordings: the mic is
+   echo-cancelled against the system track into a temporary 16 kHz file,
+   which is what gets transcribed; see "Echo cancellation" below) →
+   `Transcriber` (dispatches on `TranscriptionModel.engine`)
    → `TranscriptBuilder` (transcript.md with frontmatter; hallucination and
    caption filters; language per 30 s window via `LanguagePolicy`).
 4. `SinkDispatcher` delivers to every active `TranscriptSink`
@@ -46,7 +49,8 @@ module). CI runs `swift test` directly. Suites: Smoke, Lifecycle,
 TranscriptBuilder (fixtures in `TranscriptBuilderFixtures.swift`, shared
 with `--cleanup-test`), TranscriberWindow, CaptureSupport, Settings
 (+ SettingsParser, serialized because it sets environment variables),
-PaddedCAFWriter. Add tests with any logic change.
+PaddedCAFWriter, MicPadding, EchoCanceller. Add tests with any logic
+change.
 
 Requires Swift 6.2+ (Xcode 26, which runs on macOS 15.6+) to build; the app
 runs on macOS 15+. The floor is macOS 15 in both `Package.swift` and
@@ -68,6 +72,7 @@ stdin), `--transcribe <audio> [--model <id>]`, `--retranscribe <slug> [--model <
 (a cloud `--model` is the consent to send that audio), `--probe-language <slug>`
 (per-stream language scores + decision, for calibrating `STT_LANGUAGE_MARGIN`),
 `--detect-lang <audio>`, `--dup-check <slug>`, `--diarize <audio>`,
+`--echo-cancel <mic-audio> <system-audio> <out.caf>`,
 `--import-file <path> [--title T] [--model <id>]`, `--deliver <slug> [--run]`
 (the delivery plan, or one attempt per pending sink), `--cleanup-test`,
 `--self-test`. `--list-memos [N]` / `--import-memo <id> [--title T] [--model <id>]`
@@ -126,6 +131,12 @@ of a meeting while the menubar keeps saying "recording". The rules:
   never delivered a buffer, capped at 60 s; batches of 20 attempts, 1 s
   apart. Each engine keeps its own restart loop inline, because the loops'
   guards differ.
+- **Mic echo cancellation is off by default; keep it off.** macOS voice
+  processing on an input device attenuates that device for every other
+  app reading it (measured on the built-in mic: −60.7 dB mean with the
+  recorder's voice processing on, against −17.6 dB without), so the
+  people on the call can barely hear you. `MIC_VOICE_PROCESSING` defaults
+  to `off`; `auto` and `on` are opt-in and cost the call app's mic.
 - The tap block is built in a `nonisolated static func`. A closure formed
   inside a `@MainActor` method inherits main-actor isolation and SIGTRAPs on
   the audio thread (`dispatch_assert_queue`). Don't inline it.
@@ -338,9 +349,100 @@ the bundle on every build. Don't edit the built copy.
 - If a grant seems stuck (System Settings still lists an old signature),
   remove the entry with the `–` button and grant it again on next launch.
 
+## Echo cancellation (after the call, never live)
+
+On speakers the mic hears the far side, and Whisper writes their words under
+"Me" (or only theirs, when they are louder than you at the mic). Live
+voice processing on the mic is not the answer: it attenuates the device for
+every app, including the call (see the mic-capture rules). Instead
+`EchoCanceller` runs WebRTC's AEC3 over the saved files before
+transcription, with the system track as the reference:
+
+- Alignment first: GCC-PHAT cross-correlation in 30 s blocks wherever the
+  system track is above -50 dBFS (eligible blocks); a block is confident
+  when its peak (by magnitude, so an inverted path counts) is ≥ 9× the
+  correlation RMS over the searched lags. Lags searched: −50 ms to +10 s.
+  The mic file starts first and the system file at its engine's first
+  buffer (ScreenCaptureKit: up to ~7 s later), so a real echo always lags;
+  a negative lag means the system track carries the mic's own voice (a far
+  end without AEC, a monitored mic), and cancelling that erased the user
+  (−30 dB in review), so it is never searched.
+- A line lag = delay + drift·t is fitted through the confident blocks
+  (constant median vs Theil–Sen, |drift| ≤ 500 ppm, the one with more
+  blocks within 5 ms wins, refined by least squares). Accepted only with a
+  majority of the confident blocks, at least two when two blocks had sound,
+  and at least a quarter of the eligible blocks. Otherwise no acoustic path
+  (headphones, a virtual mic) → skipped, raw mic transcribed. A fixed lag
+  rejected a USB-mic-style 21 ppm over 30 min; the line takes it (60/60
+  blocks, 44 dB at both ends).
+- The reference is read at 16 kHz / (1 − drift) (ExtAudioFile resamples it
+  onto the mic's clock) and shifted so the echo trails it by 40 ms: AEC3
+  alone tracks only about 300 ms of offset (measured: 40 dB removed at
+  0.06–1 s with the shift, 0.5 dB at 1 s without). AEC3's output lags its
+  input by 128 samples (`WEBRTC_AEC_LATENCY`); they are dropped from the
+  front and flushed at the end, so the cleaned file has the mic's length
+  and timeline to the sample.
+- The system track's start on the mic timeline is recorded at capture
+  (`capture_health.system_start_offset_seconds`: the host time of the mic
+  file's first sample, latched only from a valid device timestamp after
+  its write succeeded, vs the system file's first sample: ScreenCaptureKit
+  PTS converted from `SCStream.synchronizationClock` to the host clock with
+  `CMSyncConvertTime`, the tap's `mHostTime` only when flagged valid; no
+  valid stamp → no offset; trusted only within -0.5…20 s). Measured on a
+  MacBook on speakers: offset 0.107 s, echo at offset + 27 ms. With it the
+  search is offset −100 ms…+3 s (jitter and unpadded ≤ 50 ms mic gaps
+  before; Bluetooth/AirPlay output latency after), with the mic read ahead
+  by the offset so block pairs overlap fully, and the mic's own voice
+  coming back (a network round trip, well over 100 ms, before the offset)
+  cannot be mistaken for echo. Without it (older recordings) the wide
+  window applies, where a returned voice behind a start offset can still
+  look like echo (a test shows both sides). Known limits, left on
+  purpose: a mid-call jump in the path (switching to AirPlay) is not
+  modelled by the drift line (one route's blocks win or neither does); the
+  mic's ≤ 50 ms unpadded gaps add up against the 100 ms early allowance
+  (carrying the remainder in the mic's padding would fix it); a mic routed
+  back into the system output locally within 100 ms (an unexcluded
+  monitoring tool) can still be taken for echo, which moves those words to
+  "Them" rather than losing them; ScreenCaptureKit restarts keep using the
+  new stream's PTS for gaps, verified exact by `--system-test`, assumed to
+  share the host timebase. TranscriptBuilder
+  moves the later-starting stream by the offset, so no segment is negative.
+  `--pair-test <seconds> <dir>` (TCC, run in the bundle) records both
+  engines like a session and prints the offset beside the measured lag.
+- Output: 16 kHz mono 16-bit CAF in the temp directory, read by both
+  engines (local and cloud), deleted after the job. The recording is never
+  modified, so re-transcribe always starts from the raw mic. A canceller
+  failure is logged and the raw mic is transcribed.
+- AEC3 config: the defaults with a 32-block (128 ms) linear filter instead
+  of 13. Chosen through Whisper on 12 synthetic double-talk cases (two
+  scripts, echo +6/0/−6 dB against the speaker, mild and harsh speaker
+  distortion): near-speaker words lost 37% → 18% (3% vs 31% at 0 dB), far
+  words leaked 0% either way; 20/24/40/48 blocks did worse. Feeding Whisper
+  the linear output, or the suppressor's gain floored at −6/−12 dB (what
+  the AEC-for-ASR literature suggests), kept every near word but leaked
+  ~60% of the far words: Whisper normalises level and transcribes quiet
+  residual echo. Tuning the suppressor itself bought ~2 dB. Weak spot left:
+  echo louder than you while both talk (+6 dB: ~50% of your words lost).
+  Synthetic only until checked on a real speakers recording.
+- About 40× realtime in release (~2 min for a 90-minute call); the vendored
+  C++ is built with -O2 in debug too.
+- `ECHO_CANCEL` / Settings › Transcription › Echo, default on.
+  `EchoCancellerTests` cover the correlator (lags, polarity, unrelated
+  tracks), the line fit (constant, drift, a stray block), the reference
+  plan, whole-file runs at 0.75 s and 3.5 s offsets (≥ 25 dB removed, near
+  speaker within 1.5 dB), 200 ppm drift, sample alignment of the output,
+  the mic's own voice coming back (no cancelling) and no echo path.
+  A cancelled job cancels the pass and deletes its temp file.
+- Vendored: `Sources/CWebRTCAEC` (C interface in `include/webrtc_aec.h`,
+  `upstream/` = the files listed in `MANIFEST` from webrtc-audio-processing
+  2.1 and abseil-cpp 20240722.0, unedited). `scripts/vendor-webrtc-aec.sh
+  [--check] <tarballs>` regenerates or verifies it against the pinned
+  sha256s.
+
 ## Dependencies
 
-Two external SwiftPM dependencies: WhisperKit (local STT on the ANE) and
+Two external SwiftPM dependencies, plus one vendored library (WebRTC's
+AEC3 echo canceller, see above): WhisperKit (local STT on the ANE) and
 FluidAudio (local speaker diarization, pulled in with only its `Diarizer`
 trait). Audio capture, EventKit and the cloud/HTTP path use only system
 frameworks; the cloud tier talks to the OpenAI transcriptions API directly

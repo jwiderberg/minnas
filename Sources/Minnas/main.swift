@@ -741,6 +741,94 @@ if let idx = CommandLine.arguments.firstIndex(of: "--detect-lang") {
     dispatchMain()
 }
 
+// Records the mic and the configured system engine together, started in
+// the order RecordingSession uses, into <dir>/mic.caf and <dir>/system.caf
+// (no outbox slot), then prints the recorded system start offset and runs
+// the echo canceller with it. Needs TCC: run it inside the bundle, via
+// `open` for a real system-audio signal (see --system-test).
+//   minnas --pair-test <seconds> <dir>
+if let idx = CommandLine.arguments.firstIndex(of: "--pair-test") {
+    let args = CommandLine.arguments
+    guard idx + 2 < args.count, let seconds = Int(args[idx + 1]) else {
+        FileHandle.standardError.write(Data("usage: --pair-test <seconds> <dir>\n".utf8))
+        exit(2)
+    }
+    let dir = URL(fileURLWithPath: args[idx + 2])
+    Task { @MainActor in
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let micURL = dir.appendingPathComponent("mic.caf"), systemURL = dir.appendingPathComponent("system.caf")
+        let systemAudio = SystemAudioEngines.make(outputURL: systemURL)
+        let mic = MicCapture(outputURL: micURL)
+        do {
+            try await mic.start()
+            try await systemAudio.start()
+        } catch {
+            print("start failed: \(error)")
+            exit(1)
+        }
+        let t0 = Date()
+        while Date().timeIntervalSince(t0) < Double(seconds) {
+            mic.checkHealth()
+            systemAudio.checkHealth()
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        await systemAudio.stop()
+        mic.stop()
+        let offset = CaptureHealth.startOffset(mic: mic.fileStartHostSeconds, system: systemAudio.fileStartHostSeconds)
+        print(String(format: "engine=%@ mic start=%@ system start=%@ offset=%@",
+                     Config.systemAudioEngine().rawValue,
+                     mic.fileStartHostSeconds.map { String(format: "%.3f", $0) } ?? "nil",
+                     systemAudio.fileStartHostSeconds.map { String(format: "%.3f", $0) } ?? "nil",
+                     offset.map { String(format: "%.3f s", $0) } ?? "nil"))
+        for (label, known) in [("with offset", offset), ("wide search", nil)] {
+            let out = dir.appendingPathComponent("clean-\(known == nil ? "wide" : "offset").caf")
+            do {
+                switch try EchoCanceller.cancel(mic: micURL, reference: systemURL, output: out, startOffset: known) {
+                case .noEcho: print("\(label): no echo")
+                case .cancelled(let a, let reduction):
+                    print(String(format: "%@: echo lag %.3f s (offset + %.0f ms), drift %.1f ppm, %d/%d/%d blocks, mic energy -%.1f dB",
+                                 label, a.delaySeconds, (a.delaySeconds - (offset ?? 0)) * 1000, a.driftPPM,
+                                 a.agreeingBlocks, a.confidentBlocks, a.eligibleBlocks, reduction))
+                }
+            } catch {
+                print("\(label): failed: \(error)")
+            }
+        }
+        exit(0)
+    }
+    dispatchMain()
+}
+
+// Echo-cancel a mic track against a system track, as transcription does
+// (no TCC): prints the measured echo delay and the energy removed, and
+// writes the cleaned 16 kHz mic to <out.caf>. No echo found → no file.
+//   minnas --echo-cancel <mic-audio> <system-audio> <out.caf>
+if let idx = CommandLine.arguments.firstIndex(of: "--echo-cancel") {
+    let args = CommandLine.arguments
+    guard idx + 3 < args.count else {
+        FileHandle.standardError.write(Data("usage: --echo-cancel <mic-audio> <system-audio> <out.caf>\n".utf8))
+        exit(2)
+    }
+    let mic = URL(fileURLWithPath: args[idx + 1])
+    let system = URL(fileURLWithPath: args[idx + 2])
+    let out = URL(fileURLWithPath: args[idx + 3])
+    let started = Date()
+    do {
+        switch try EchoCanceller.cancel(mic: mic, reference: system, output: out) {
+        case .noEcho:
+            print("no echo of the system track in the mic track; nothing written")
+        case .cancelled(let alignment, let reduction):
+            print(String(format: "echo delay %.3f s, drift %.1f ppm (%d of %d confident blocks on the line, %d with sound), mic energy -%.1f dB, %.1f s, wrote %@",
+                         alignment.delaySeconds, alignment.driftPPM, alignment.agreeingBlocks, alignment.confidentBlocks,
+                         alignment.eligibleBlocks, reduction, Date().timeIntervalSince(started), out.path))
+        }
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("echo-cancel failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 // Dev: report the mic/system envelope correlation for a stored recording,
 // to calibrate the duplicate-stream threshold (mr#10).
 //   minnas --dup-check <slug>

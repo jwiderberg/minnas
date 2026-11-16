@@ -95,7 +95,8 @@ final class RecordingSession {
             system_padded_seconds: systemAudio.paddedSecondsTotal,
             system_buffers: Int(systemAudio.buffersDelivered),
             system_had_signal: systemAudio.hasSignal,
-            system_writer_failed: systemAudio.hasWriterFailed
+            system_writer_failed: systemAudio.hasWriterFailed,
+            system_start_offset_seconds: CaptureHealth.startOffset(mic: mic.fileStartHostSeconds, system: systemAudio.fileStartHostSeconds)
         )
     }
     func systemHasSignal() -> Bool { systemAudio?.hasSignal ?? false }

@@ -128,6 +128,8 @@ final class TapRing: @unchecked Sendable {
     static let slotFrames = 1024
     let samples: UnsafeMutablePointer<Float>
     let hostTimes: UnsafeMutablePointer<UInt64>
+    /// Whether the slot's host time came from the device (not the callback clock).
+    let hostTimeValid: UnsafeMutablePointer<Bool>
     let frameCounts: UnsafeMutablePointer<Int>
     let rates: UnsafeMutablePointer<Double>
     /// Slots written / read so far (monotonic; index = value & mask).
@@ -144,6 +146,8 @@ final class TapRing: @unchecked Sendable {
         samples.initialize(repeating: 0, count: Self.slotCount * Self.slotFrames * 2)
         hostTimes = .allocate(capacity: Self.slotCount)
         hostTimes.initialize(repeating: 0, count: Self.slotCount)
+        hostTimeValid = .allocate(capacity: Self.slotCount)
+        hostTimeValid.initialize(repeating: false, count: Self.slotCount)
         frameCounts = .allocate(capacity: Self.slotCount)
         frameCounts.initialize(repeating: 0, count: Self.slotCount)
         rates = .allocate(capacity: Self.slotCount)
@@ -153,6 +157,7 @@ final class TapRing: @unchecked Sendable {
     deinit {
         samples.deallocate()
         hostTimes.deallocate()
+        hostTimeValid.deallocate()
         frameCounts.deallocate()
         rates.deallocate()
     }
@@ -286,6 +291,8 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
     var buffersDropped: UInt64 { cafStats.dropped &+ ring.overflows.load(ordering: .relaxed) }
     var paddedSecondsTotal: Double { cafStats.paddedSeconds }
     var hasWriterFailed: Bool { cafStats.hasFailed }
+    /// The first buffer's host time, when the device stamped it.
+    var fileStartHostSeconds: Double? { cafStats.fileStartHostSeconds }
     var permissionSuspect: Bool { suspect.load(ordering: .relaxed) }
 
     func snapshotPeak() -> Float {
@@ -697,7 +704,8 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                 }
             }
             guard frames > 0 else { return }
-            let startTicks = inInputTime.pointee.mFlags.contains(.hostTimeValid) ? inInputTime.pointee.mHostTime : now
+            let validHost = inInputTime.pointee.mFlags.contains(.hostTimeValid)
+            let startTicks = validHost ? inInputTime.pointee.mHostTime : now
 
             var offset = 0
             while offset < frames {
@@ -719,6 +727,7 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
                 }
                 ring.hostTimes[slot] = startTicks &+ UInt64(Double(offset) * ticksPerFrame)
                 ring.frameCounts[slot] = n
+                ring.hostTimeValid[slot] = validHost
                 ring.rates[slot] = layout.sampleRate
                 ring.head.store(h &+ 1, ordering: .releasing)
                 offset += n
@@ -792,6 +801,12 @@ final class SystemAudioTapCapture: SystemAudioEngine, @unchecked Sendable {
             let hostSeconds = Double(ring.hostTimes[slot]) / HostClock.ticksPerSecond
             let samples = UnsafePointer(ring.samples + slot * TapRing.slotFrames * 2)
             analyze(samples, count: frames * 2, hostSeconds: hostSeconds)
+            let firstOfFile = !caf.sessionStarted
+            defer {
+                if firstOfFile, caf.sessionStarted, ring.hostTimeValid[slot] {
+                    cafStats.noteFileStart(hostSeconds: hostSeconds)
+                }
+            }
             if rate == Self.fileRate {
                 append(UnsafeRawPointer(samples), frames: frames, hostSeconds: hostSeconds)
             } else {
