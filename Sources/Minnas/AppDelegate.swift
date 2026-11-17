@@ -13,6 +13,7 @@
 //
 
 import AppKit
+import Carbon.HIToolbox
 import Foundation
 import os.log
 
@@ -24,6 +25,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let session = RecordingSession()
     private var recordingTimer: Timer?
+    // Hidden mode: a click on the red dot hides the counter and level bars
+    // (and shows them again), for screen sharing. Kept until the app quits.
+    private var counterHidden = false
+    // While recording the status item has no menu of its own, so a plain
+    // click can toggle hidden mode; this is the menu Option/Control-click
+    // opens.
+    private var recordingMenu: NSMenu?
+    // ⌃⌥⌘R: start a recording named after the time, or stop the current one.
+    private var quickRecordHotKey: GlobalHotKey?
 
     // Calendar prompt loop. Polls the calendar (EventKit) for soon-to-start
     // meetings and offers to record them. promptedEventIDs keeps us from re-prompting
@@ -149,6 +159,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         item.menu = makeMenu()
         statusItem = item
+        quickRecordHotKey = GlobalHotKey(
+            keyCode: kVK_ANSI_R, modifiers: cmdKey | optionKey | controlKey, label: "⌃⌥⌘R"
+        ) { [weak self] in
+            self?.quickRecordToggle()
+        }
         session.onUnexpectedStop = { [weak self] in
             self?.handleExternalStop()
         }
@@ -527,6 +542,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     keyEquivalent: "r"
                 )
             )
+            // Shows the global shortcut; works from any app, not only here.
+            let quick = NSMenuItem(
+                title: "Quick Recording (named by time)",
+                action: #selector(quickRecordFromMenu),
+                keyEquivalent: "r"
+            )
+            quick.keyEquivalentModifierMask = [.control, .option, .command]
+            menu.addItem(quick)
             if let recordings = makeRecordingsMenuItem() {
                 menu.addItem(recordings)
             }
@@ -596,8 +619,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatusItem() {
-        statusItem.menu = makeMenu()
-        guard let button = statusItem.button else { return }
+        let menu = makeMenu()
+        guard let button = statusItem.button else {
+            statusItem.menu = menu
+            return
+        }
+        if session.isRunning {
+            // No menu on the item: the click comes to statusItemClicked.
+            statusItem.menu = nil
+            recordingMenu = menu
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        } else {
+            statusItem.menu = menu
+            recordingMenu = nil
+            button.action = nil
+            button.toolTip = Self.appName
+        }
 
         if session.isRunning, let startedAt = session.meta?.started_at {
             let image = Self.recordingIcon()
@@ -605,7 +644,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = image
             let micBar = Self.levelBar(for: session.micPeak())
             let sysBar = Self.levelBar(for: session.systemPeak())
-            button.title = " \(Self.elapsedString(since: startedAt)) \(micBar) \(sysBar)"
+            button.title = StatusItemPolicy.recordingTitle(
+                elapsed: Self.elapsedString(since: startedAt), micBar: micBar, systemBar: sysBar,
+                hidden: counterHidden)
+            button.toolTip = "Recording. Click to hide or show the timer; Option-click for the menu; ⌃⌥⌘R stops."
             startRecordingTimer()
         } else if isTranscribing {
             let image = Self.transcribingIcon()
@@ -619,6 +661,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = image
             button.title = ""
             stopRecordingTimer()
+        }
+    }
+
+    /// A click on the status item while recording. Plain click: hidden mode
+    /// on/off. Option- or Control-click (or a secondary click): the menu.
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let flags = event?.modifierFlags ?? []
+        if StatusItemPolicy.clickOpensMenu(
+            isRightClick: event?.type == .rightMouseUp,
+            option: flags.contains(.option), control: flags.contains(.control)
+        ) {
+            let menu = recordingMenu ?? makeMenu()
+            // Attach the menu only for this click; performClick shows it
+            // and returns when it closes.
+            statusItem.menu = menu
+            sender.performClick(nil)
+            if session.isRunning { statusItem.menu = nil }
+            return
+        }
+        counterHidden.toggle()
+        appLog.notice("counter \(self.counterHidden ? "hidden" : "shown", privacy: .public)")
+        refreshStatusItem()
+    }
+
+    /// ⌃⌥⌘R from any app: stop the recording that is on, or start one named
+    /// "Recording <date> <time>" without the title dialog or calendar picker.
+    @objc private func quickRecordFromMenu() { quickRecordToggle() }
+
+    private func quickRecordToggle() {
+        if session.isRunning {
+            appLog.notice("hotkey: stopping recording")
+            _ = beginStoppingRecording()
+            return
+        }
+        guard !isStopping else { return }
+        let title = StatusItemPolicy.quickRecordingTitle(at: Date())
+        appLog.notice("hotkey: starting \(title, privacy: .public)")
+        Task { @MainActor in
+            await startSession(title: title, tag: nil)
         }
     }
 
@@ -656,8 +738,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let sysStalled = session.systemStalledSince()
         let micBar = stalled == nil ? Self.levelBar(for: session.micPeak()) : "✗"
         let sysBar = sysStalled == nil ? Self.levelBar(for: session.systemPeak()) : "✗"
-        // Format: " 0:42 ▇ ▁" — mic level, then space, then system level.
-        statusItem.button?.title = " \(Self.elapsedString(since: startedAt)) \(micBar) \(sysBar)"
+        // Format: " 0:42 ▇ ▁" — mic level, then space, then system level;
+        // empty in hidden mode.
+        statusItem.button?.title = StatusItemPolicy.recordingTitle(
+            elapsed: Self.elapsedString(since: startedAt), micBar: micBar, systemBar: sysBar,
+            hidden: counterHidden)
         if let stalled, !micStallAlerted, Date().timeIntervalSince(stalled) > 10 {
             micStallAlerted = true
             alertMicStalled()

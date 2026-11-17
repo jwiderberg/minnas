@@ -38,9 +38,16 @@ To record a meeting:
 1. Join the call as you normally would, in Teams, Zoom, Meet or anything
    else.
 2. Click the microphone icon in the menu bar and choose Start Recording….
-   Pick the meeting or type a name, then click Start. The icon changes
-   while it records.
-3. When the meeting is over, click the icon and choose Stop Recording.
+   Pick the meeting or type a name, then click Start. The icon turns into a
+   red dot with a timer while it records.
+3. When the meeting is over, hold down the Option key, click the red dot and
+   choose Stop Recording.
+
+There's a quicker way too: press Control-Option-Command-R (⌃⌥⌘R) in any app
+to start a recording named after the date and time, and press it again to
+stop. While recording, a plain click on the red dot hides the timer and the
+level bars, for when you share your screen; click it again to bring them
+back.
 
 Minnas then turns the recording into text on your Mac. That takes a few
 minutes for an hour-long meeting; the very first time it takes longer,
@@ -149,6 +156,12 @@ all your transcriptions, regardless of platform, local and in an open format
 - The language is detected per recording from the languages you list
   (English by default; add Swedish, or whatever else you speak, in
   Settings), and it switches mid-meeting when the language does.
+- While recording, the menu bar shows a red dot, the time and two level
+  bars (microphone, then system audio). A click on the dot hides the time
+  and bars, for screen sharing, and another brings them back; Option-click
+  (or Control-click) opens the menu. ⌃⌥⌘R from any app starts a recording
+  named after the date and time ("Recording 2026-11-17 13:05") and stops it
+  again.
 
 ## Requirements
 

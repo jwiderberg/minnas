@@ -49,7 +49,7 @@ module). CI runs `swift test` directly. Suites: Smoke, Lifecycle,
 TranscriptBuilder (fixtures in `TranscriptBuilderFixtures.swift`, shared
 with `--cleanup-test`), TranscriberWindow, CaptureSupport, Settings
 (+ SettingsParser, serialized because it sets environment variables),
-PaddedCAFWriter, MicPadding, EchoCanceller. Add tests with any logic
+PaddedCAFWriter, MicPadding, EchoCanceller, StatusItemPolicy. Add tests with any logic
 change.
 
 Requires Swift 6.2+ (Xcode 26, which runs on macOS 15.6+) to build; the app
@@ -303,6 +303,16 @@ of a meeting while the menubar keeps saying "recording". The rules:
   threshold). `CoreAudioHAL.swift`: the Core Audio property helpers used by
   the taps engine and `AudioRoute` (the default devices, for logs and
   harnesses; any HAL failure → nil).
+- **Menu bar item while recording** (`StatusItemPolicy` in
+  GlobalHotKey.swift, `StatusItemPolicyTests`): the counter is drawn in SF
+  Mono so it holds its width. The item has no menu of its own while
+  recording, so a plain click reaches `statusItemClicked`: it toggles hidden
+  mode (counter and bars gone, red dot only; kept until quit), while
+  Option-, Control- or secondary click attaches the menu for that one click
+  (`performClick`). `GlobalHotKey` registers ⌃⌥⌘R through Carbon
+  `RegisterEventHotKey` (no Accessibility grant; logs when another app holds
+  it): start "Recording yyyy-MM-dd HH:mm" with no dialog or calendar tag, or
+  stop the recording that is on. The menu lists it as Quick Recording.
 - **UI:** `SettingsWindow` (General / Transcription / Cloud / Calendar /
   Permissions; AppKit; every control writes through `Settings.shared`),
   `Onboarding` (4 steps on first launch, `settings.onboardingCompleted`;
