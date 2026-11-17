@@ -140,6 +140,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = Self.idleIcon()
             button.image?.isTemplate = true
             button.imagePosition = .imageLeading
+            // Fixed-width font for the " 0:42 ▆ ▁" counter: in the
+            // proportional menu bar font the digits, the level bars and ✗
+            // have different widths, so the item jittered every second.
+            button.font = .monospacedSystemFont(
+                ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
             button.toolTip = Self.appName
         }
         item.menu = makeMenu()
