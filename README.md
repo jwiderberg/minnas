@@ -112,7 +112,7 @@ nonsense, reuse your phone as the hardware for physical meetings, and keep
 all your transcriptions, regardless of platform, local and in an open format
 (Markdown) you can dump in Obsidian, Claude Desktop, etc.
 
-## What it does
+## How it works
 
 - Minnas captures the audio your Mac plays and the audio your microphone
   hears, so Zoom, Teams, Meet, FaceTime and a browser tab all look the same
