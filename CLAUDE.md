@@ -471,7 +471,9 @@ the image's Xcode 26, sign with the "Developer ID Application" certificate
 (`CODESIGN_IDENTITY` env to `scripts/make-app.sh`, which then signs with a
 secure timestamp), notarize with `notarytool` (App Store Connect API key),
 staple, `spctl --assess` must say `Notarized Developer ID`, zip with `ditto`,
-SHA-256, `actions/attest-build-provenance`, `gh release create`. The tag must
+SHA-256, `actions/attest-build-provenance`, `gh release create`, then
+deletes every other release (never the tags): only the latest release is
+kept on the Releases page, by rule. The tag must
 equal `v` + `CFBundleShortVersionString` in `App/Info.plist`, or the job fails
 before building. Secrets: `DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`,
 `NOTARY_KEY_P8_BASE64`, `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`, loaded with

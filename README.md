@@ -166,7 +166,8 @@ carries a `Minnas-<version>.zip` that GitHub Actions built from the tagged commi
 signed with a Developer ID certificate and notarized by Apple, so it opens
 without a Gatekeeper warning. Unzip it, move Minnas.app to /Applications,
 open it. [Verify a download](#verify-a-download) explains how to check what
-you got.
+you got. Only the latest release is kept. To build an older version from
+source, run `git checkout v<version>` before the install script (see below).
 
 ### Build from source
 

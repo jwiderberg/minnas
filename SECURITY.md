@@ -109,7 +109,9 @@ A release is produced by `.github/workflows/release.yml` on a hosted GitHub
 runner, from the commit the tag points at. The runner signs the app with a
 Developer ID Application certificate, submits it to Apple's notary service,
 staples the ticket, zips it, and publishes the zip, its SHA-256 and a
-Sigstore-signed build-provenance attestation.
+Sigstore-signed build-provenance attestation. Only the latest release is
+kept; the workflow deletes the older ones after publishing, and their tags
+stay in the repository.
 
 What that lets you check (commands in the README under "Verify a download"):
 

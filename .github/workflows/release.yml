@@ -40,6 +40,9 @@ name: Release
 # the write permissions (release, OIDC token for Sigstore, attestations) and
 # no secrets of its own: it downloads the zip, attests it and creates the
 # release. It runs only for a tag.
+#
+# Only the latest release is kept: after publishing, the job deletes every
+# other release. Their tags stay.
 
 on:
   push:
@@ -361,3 +364,19 @@ jobs:
             --title "Minnas $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --verify-tag
+
+      # Only the newest release is kept on the Releases page. The older ones
+      # are deleted once this one is published; their tags stay, so any
+      # earlier version can still be built from source.
+      - name: Remove older releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+              --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              [ "$tag" = "$GITHUB_REF_NAME" ] && continue
+              echo "deleting release $tag (tag kept)"
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
+            done
