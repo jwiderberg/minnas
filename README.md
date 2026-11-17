@@ -6,6 +6,63 @@ Minnas is a Mac menubar app that records your meetings, transcribes them on
 the Mac itself, and drops the result as a Markdown file into a folder you
 pick. "Minnas" is Swedish for "to remember".
 
+## Getting started
+
+This part is for you if you just want to use Minnas and would rather not
+touch the Terminal. The rest of the page goes into detail you can skip.
+
+You need a Mac with an Apple chip (M1 or newer) running macOS 15 or later.
+To check, open the Apple menu and choose About This Mac: "Chip" should say
+Apple M-something, and "macOS" should show 15 or higher. You also need about
+3 GB of free space for the speech models.
+
+To install it:
+
+1. Go to the [releases page](https://github.com/jwiderberg/minnas/releases)
+   and, under the newest release, download the file named
+   `Minnas-<version>.zip`.
+2. Double-click the downloaded file to unzip it, then drag Minnas into your
+   Applications folder.
+3. Open Minnas from Applications. It doesn't appear in the Dock; look for a
+   small microphone icon in the menu bar at the top right of the screen.
+
+The first time it opens, a setup window walks you through four steps. It asks
+where to keep your transcripts (the suggested folder in Documents is fine),
+asks for access to the microphone, and sends you to System Settings to allow
+recording the audio from the call. In System Settings, find Minnas under
+Privacy & Security › Screen & System Audio Recording and switch it on. If
+macOS asks to quit and reopen Minnas, let it. The last step offers two
+extras, cloud transcription and a calendar reminder; you can skip both.
+
+To record a meeting:
+
+1. Join the call as you normally would, in Teams, Zoom, Meet or anything
+   else.
+2. Click the microphone icon in the menu bar and choose Start Recording….
+   Pick the meeting or type a name, then click Start. The icon changes
+   while it records.
+3. When the meeting is over, click the icon and choose Stop Recording.
+
+Minnas then turns the recording into text on your Mac. That takes a few
+minutes for an hour-long meeting; the very first time it takes longer,
+because it downloads the speech models first. The transcript shows up as a
+file in the folder you chose, and you can also open it from the icon's
+Recordings menu. Your words are labelled "Me" and everyone else's "Them".
+Headphones or speakers both work.
+
+For a meeting in a room with no call, start a recording the same way and
+keep the Mac on the table. You can also record on your iPhone with the Voice
+Memos app and bring it in afterwards with Import Voice Memos… in the menu
+(it needs one more permission, explained under
+[First run and permissions](#first-run-and-permissions)).
+
+If the transcript only has your side and nothing from the others, the
+permission to record the call's audio is missing. Check it in System
+Settings as described above and try again.
+
+Tell the people in the meeting that you're recording it. In many places the
+law requires their consent.
+
 ## Why
 
 I work across many platforms: Teams, Zoom, Meet... Each platform's own notes
