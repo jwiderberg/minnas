@@ -63,7 +63,7 @@ Settings as described above and try again.
 Tell the people in the meeting that you're recording it. In many places the
 law requires their consent.
 
-## Why
+## Background
 
 I work across many platforms: Teams, Zoom, Meet... Each platform's own notes
 feature covers that platform only and needs its own licence: Teams'
