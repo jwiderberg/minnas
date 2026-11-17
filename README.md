@@ -18,9 +18,8 @@ Apple M-something, and "macOS" should show 15 or higher. You also need about
 
 To install it:
 
-1. Go to the [releases page](https://github.com/jwiderberg/minnas/releases)
-   and, under the newest release, download the file named
-   `Minnas-<version>.zip`.
+1. Open the [latest release](https://github.com/jwiderberg/minnas/releases/latest)
+   and download the file named `Minnas-<version>.zip`.
 2. Double-click the downloaded file to unzip it, then drag Minnas into your
    Applications folder.
 3. Open Minnas from Applications. It doesn't appear in the Dock; look for a
@@ -162,8 +161,8 @@ all your transcriptions, regardless of platform, local and in an open format
 
 ### Download
 
-Each [release](https://github.com/jwiderberg/minnas/releases) carries a
-`Minnas-<version>.zip` that GitHub Actions built from the tagged commit,
+The [latest release](https://github.com/jwiderberg/minnas/releases/latest)
+carries a `Minnas-<version>.zip` that GitHub Actions built from the tagged commit,
 signed with a Developer ID certificate and notarized by Apple, so it opens
 without a Gatekeeper warning. Unzip it, move Minnas.app to /Applications,
 open it. [Verify a download](#verify-a-download) explains how to check what
