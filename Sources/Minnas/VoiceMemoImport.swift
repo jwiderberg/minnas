@@ -189,6 +189,10 @@ final class VoiceMemoImportWindowController: NSWindowController, NSWindowDelegat
             backing: .buffered, defer: false
         )
         window.title = "Import Voice Memos"
+        // Fixed width, resizable height only: the columns are laid out for
+        // 720 points, and nothing in the window may push it wider.
+        window.contentMinSize = NSSize(width: 720, height: 300)
+        window.contentMaxSize = NSSize(width: 720, height: 10_000)
         window.center()
         super.init(window: window)
         window.delegate = self
@@ -263,6 +267,11 @@ final class VoiceMemoImportWindowController: NSWindowController, NSWindowDelegat
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        // A long status ("Reading the library…", an error) truncates
+        // instead of widening the button row and with it the window.
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        hint.preferredMaxLayoutWidth = 688
 
         grantAccessButton.target = self
         grantAccessButton.action = #selector(openFullDiskAccess)

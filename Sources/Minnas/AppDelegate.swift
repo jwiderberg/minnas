@@ -145,6 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        NSApp.mainMenu = Self.makeMainMenu()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             button.image = Self.idleIcon()
@@ -662,6 +663,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = ""
             stopRecordingTimer()
         }
+    }
+
+    /// A menu bar app shows no menu bar of its own, but ⌘X/⌘C/⌘V/⌘A/⌘Z in
+    /// a text field are still menu key equivalents: without an Edit menu in
+    /// mainMenu there is nothing to send paste: to, and the memo titles, the
+    /// import title dialog and the API key field could not be pasted into.
+    private static func makeMainMenu() -> NSMenu {
+        let main = NSMenu()
+        // The first item is the app menu. It stays empty: a ⌘Q there would
+        // stop a recording whenever one of the app's windows had focus.
+        let appItem = NSMenuItem()
+        appItem.submenu = NSMenu()
+        main.addItem(appItem)
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+        return main
     }
 
     /// A click on the status item while recording. Plain click: hidden mode
