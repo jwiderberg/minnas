@@ -49,7 +49,7 @@ module). CI runs `swift test` directly. Suites: Smoke, Lifecycle,
 TranscriptBuilder (fixtures in `TranscriptBuilderFixtures.swift`, shared
 with `--cleanup-test`), TranscriberWindow, CaptureSupport, Settings
 (+ SettingsParser, serialized because it sets environment variables),
-PaddedCAFWriter, MicPadding, EchoCanceller, StatusItemPolicy. Add tests with any logic
+PaddedCAFWriter, MicPadding, EchoCanceller, StatusItemPolicy, MeetingDetails. Add tests with any logic
 change.
 
 Requires Swift 6.2+ (Xcode 26, which runs on macOS 15.6+) to build; the app
@@ -303,6 +303,12 @@ of a meeting while the menubar keeps saying "recording". The rules:
   threshold). `CoreAudioHAL.swift`: the Core Audio property helpers used by
   the taps engine and `AudioRoute` (the default devices, for logs and
   harnesses; any HAL failure → nil).
+- **Full meeting details** (`MeetingDetails`, `MARKDOWN_MEETING_DETAILS` /
+  `markdownFullMeetingDetails`, default off): the event's location and
+  notes are stored in meta (`calendar_location`, `calendar_notes`) whenever a recording is tagged; with the setting on,
+  `MarkdownFolderSink` adds attendees and location to the frontmatter and
+  the notes as a quoted "Invite notes" section (HTML reduced to text, capped
+  at 8,000 characters). transcript.md itself is never changed by it.
 - **Menu bar item while recording** (`StatusItemPolicy` in
   GlobalHotKey.swift, `StatusItemPolicyTests`): the counter is drawn in SF
   Mono so it holds its width. The item has no menu of its own while

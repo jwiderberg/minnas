@@ -93,6 +93,10 @@ struct RecordingMeta: Codable, Sendable {
     // calendar integration; nil until then). A delivery sink may send them
     // so the receiving side can resolve attendees without re-fetching.
     var attendees: [Attendee]?
+    // The event's location and invite notes, so the delivered transcript
+    // can carry them when full meeting details are on (MeetingDetails).
+    var calendar_location: String?
+    var calendar_notes: String?
     var languages_detected: [DetectedLanguage]?
     var device: String
     var client_version: String

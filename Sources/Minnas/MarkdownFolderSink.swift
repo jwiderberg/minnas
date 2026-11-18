@@ -42,7 +42,11 @@ struct MarkdownFolderSink: TranscriptSink {
     func applies(to meta: RecordingMeta) -> Bool { true }
 
     func deliver(slot: OutboxSlot, meta: RecordingMeta) async throws -> SinkDelivery {
-        let content = try Data(contentsOf: slot.transcriptURL)
+        var content = try Data(contentsOf: slot.transcriptURL)
+        if Config.markdownFullMeetingDetails(),
+           let text = String(data: content, encoding: .utf8) {
+            content = Data(MeetingDetails.apply(to: text, meta: meta).utf8)
+        }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let dir = resolvedFolder
         if let owned = ownedLocation(for: meta) {

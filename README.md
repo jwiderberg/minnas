@@ -106,7 +106,7 @@ tedious manual workarounds) across services, bots and hardware. Which all
 sucks if you, like me, work across many platforms.
 
 At the same time, all the audio is already coming out of your MacBook with
-Apple silicon, which runs Whisper on its own Neural Engine. And your old
+Apple silicon, which runs Whisper on its own Neural Engine. And your
 iPhone has excellent microphones, ample storage with iCloud sync, and the
 Voice Memos app.
 
@@ -309,9 +309,13 @@ It needs Screen Recording.
   the languages detected. Then the title as a heading and the conversation
   as paragraphs labelled `**Me:**` and `**Them:**` (the other person's name
   in a 1:1, `Them (A)`, `Them (B)` when several people speak). Attendee
-  names and email addresses stay in `meta.json` in the working data; they
-  are not written to the Markdown file. Minnas adds and updates files there
-  and never deletes anything in that folder; `scripts/uninstall.sh` leaves
+  names and email addresses stay in `meta.json` in the working data and are
+  not written to the Markdown file, unless you turn on full meeting details
+  under Settings › General (`markdownFullMeetingDetails`). Then a recording
+  tagged with a calendar event also gets its attendees and location in the
+  frontmatter, and the invite's notes as an "Invite notes" section above the
+  conversation. It applies to transcripts written after you turn it on. Minnas adds and
+  updates files there and never deletes anything in that folder; `scripts/uninstall.sh` leaves
   it alone too. Until you've chosen a folder, transcripts stay in
   the working data below; once you choose one, every existing transcript is
   written out within five minutes.

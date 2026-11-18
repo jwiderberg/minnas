@@ -475,9 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         guard !session.isRunning else { return }
-        let tag = event.calendar_event_id.map {
-            CalendarTag(eventId: $0, url: event.url, attendees: event.attendees ?? [])
-        }
+        let tag = CalendarTag(event: event)
         // Route through startSession (not session.start directly) so the
         // calendar-prompt flow gets the same isAutoStopping reset + preflight
         // silence check as a manual start.
@@ -1003,8 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func tag(for event: UpcomingEvent) -> CalendarTag? {
-        guard let id = event.calendar_event_id else { return nil }
-        return CalendarTag(eventId: id, url: event.url, attendees: event.attendees ?? [])
+        CalendarTag(event: event)
     }
 
     /// Whether an upcoming event should auto-prompt to record. The rule is

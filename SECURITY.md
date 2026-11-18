@@ -70,8 +70,10 @@ fixed.
      transcription; the command-line harnesses take an explicit `--model` as
      the consent), and the key alone when you press "Test Key".
 - It never sends audio, transcripts or calendar data anywhere else. Calendar
-  attendees (names and email addresses) of a tagged recording are stored in
-  that recording's `meta.json` on your Mac.
+  attendees (names and email addresses), location and invite notes of a
+  tagged recording are stored in that recording's `meta.json` on your Mac.
+  They reach the Markdown file in your transcripts folder only with full
+  meeting details turned on (Settings › General).
 - It does not run shell commands or load plug-ins, and the build refuses to
   link a prebuilt native text-processing library that an earlier dependency
   version shipped (`scripts/make-app.sh` checks for it).

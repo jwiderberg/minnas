@@ -23,6 +23,7 @@ import Testing
     systemAudioEngine|settings.systemAudioEngine|SYSTEM_AUDIO_ENGINE|choice(taps,sck)
     diarizeEnabled|settings.diarizeEnabled|DIARIZE|bool
     echoCancellationEnabled|settings.echoCancellationEnabled|ECHO_CANCEL|bool
+    markdownFullMeetingDetails|settings.markdownFullMeetingDetails|MARKDOWN_MEETING_DETAILS|bool
     voiceMemoUsesAppleTranscript|settings.voiceMemoUsesAppleTranscript|VOICE_MEMO_TRANSCRIPT|bool
     dedupeStreams|settings.dedupeStreams|STT_DEDUPE_STREAMS|bool
     ownerEmail|settings.ownerEmail|OWNER_EMAIL|email
@@ -60,7 +61,7 @@ import Testing
     @Test func defaultDisplayIsFrozen() {
         let golden = [
             "(off)", "30", "10", "large-v3", "auto", "en", "0.2", "false", "off",
-            "(none)", "taps", "true", "true", "false", "false", "(unset)",
+            "(none)", "taps", "true", "true", "false", "false", "false", "(unset)",
             "false", "(unset)",
         ]
         #expect(SettingKey.allCases.map(Self.defaultDisplay) == golden)
@@ -123,6 +124,9 @@ import Testing
         #expect(with("DIARIZE", "garbage", Config.diarizationEnabled) == true)
         #expect(with("ECHO_CANCEL", "off", Config.echoCancellationEnabled) == false)
         #expect(with("ECHO_CANCEL", "garbage", Config.echoCancellationEnabled) == true)
+        #expect(with("MARKDOWN_MEETING_DETAILS", "full", Config.markdownFullMeetingDetails) == true)
+        #expect(with("MARKDOWN_MEETING_DETAILS", "partial", Config.markdownFullMeetingDetails) == false)
+        #expect(with("MARKDOWN_MEETING_DETAILS", "garbage", Config.markdownFullMeetingDetails) == false)
     }
 
     @Test func voiceMemoTranscript() {

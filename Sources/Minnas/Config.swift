@@ -159,6 +159,7 @@ enum Config {
     /// Whether the mic track is echo-cancelled against the system track
     /// before transcription (ECHO_CANCEL, default on). See EchoCanceller.
     static func echoCancellationEnabled() -> Bool { get(Setting.echoCancellationEnabled) }
+    static func markdownFullMeetingDetails() -> Bool { get(Setting.markdownFullMeetingDetails) }
 
     /// Days to keep recordings on disk before pruning. 0 disables pruning.
     /// Default 30. A transcript still owed to the folder is never pruned,

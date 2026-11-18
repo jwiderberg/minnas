@@ -17,6 +17,22 @@ struct CalendarTag: Sendable {
     let eventId: String
     let url: String?
     let attendees: [Attendee]
+    var location: String? = nil
+    var notes: String? = nil
+
+    init(eventId: String, url: String?, attendees: [Attendee], location: String? = nil, notes: String? = nil) {
+        self.eventId = eventId
+        self.url = url
+        self.attendees = attendees
+        self.location = location
+        self.notes = notes
+    }
+
+    init?(event: UpcomingEvent) {
+        guard let id = event.calendar_event_id else { return nil }
+        self.init(eventId: id, url: event.url, attendees: event.attendees ?? [],
+                  location: event.location, notes: event.notes)
+    }
 }
 
 @MainActor
@@ -131,6 +147,8 @@ final class RecordingSession {
             meta.calendar_event_id = calendar.eventId
             meta.calendar_event_url = calendar.url
             meta.attendees = calendar.attendees
+            meta.calendar_location = MeetingDetails.clean(calendar.location)
+            meta.calendar_notes = MeetingDetails.clean(calendar.notes)
         }
         self.meta = meta
         // Write meta.json NOW (ended_at nil), not only at stop: if the app

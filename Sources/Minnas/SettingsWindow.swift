@@ -307,6 +307,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private let marginField = SettingsUI.numberField()
     private let marginMessage = SettingsUI.messageLabel()
     private let diarizeCheckbox = NSButton(checkboxWithTitle: "Separate the other speakers (local diarizer)", target: nil, action: nil)
+    private let detailsCheckbox = NSButton(checkboxWithTitle: "Full meeting details: attendees, location and invite notes", target: nil, action: nil)
     private let echoCheckbox = NSButton(checkboxWithTitle: "Remove the other side's voice from my track (calls on speakers)", target: nil, action: nil)
     private let voiceMemoPopup = NSPopUpButton()
     private let excludedTable = NSTableView()
@@ -431,6 +432,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         form.row(nil, [choose, folderRevealButton, folderOffButton])
         form.under(SettingsUI.note("Each finished transcript is written there as a Markdown file. \(SettingsUI.appName) only adds or updates files there, never deletes. Off = transcripts stay in the app's outbox only."))
         form.under(folderMessage)
+        detailsCheckbox.target = self
+        detailsCheckbox.action = #selector(detailsToggled)
+        form.row("In the file:", detailsCheckbox)
+        form.under(SettingsUI.note("Off = the title, the times and the calendar event's link. On, a meeting recorded from a calendar event also gets its attendees (names and email addresses), its location and the invite's notes. Applies to transcripts written from now on."))
         form.gap()
 
         keepDaysField.target = self
@@ -464,6 +469,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         folderOffButton.isEnabled = folder != nil && SettingsStorage.isSet(.transcriptsFolderPath)
         SettingsUI.show(folderMessage, info: SettingsUI.overrideNote(for: .transcriptsFolderPath))
 
+        detailsCheckbox.state = Config.markdownFullMeetingDetails() ? .on : .off
         keepDaysField.stringValue = String(Config.recordingsKeepDays())
         SettingsUI.show(keepDaysMessage, info: SettingsUI.overrideNote(for: .recordingsKeepDays))
         autoStopField.stringValue = String(Config.autoStopSilenceMinutes())
@@ -759,6 +765,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     @objc private func diarizeToggled() {
         Settings.shared.set(Setting.diarizeEnabled, diarizeCheckbox.state == .on)
+    }
+
+    @objc private func detailsToggled() {
+        Settings.shared.set(Setting.markdownFullMeetingDetails, detailsCheckbox.state == .on)
     }
 
     @objc private func echoToggled() {

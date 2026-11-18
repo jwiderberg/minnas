@@ -74,6 +74,7 @@ enum SettingKey: String, CaseIterable, Sendable {
     case systemAudioEngine
     case diarizeEnabled
     case echoCancellationEnabled
+    case markdownFullMeetingDetails
     case voiceMemoUsesAppleTranscript
     case dedupeStreams
     case ownerEmail
@@ -101,6 +102,7 @@ enum SettingKey: String, CaseIterable, Sendable {
         case .systemAudioEngine: return AnySettingSpec(Setting.systemAudioEngine)
         case .diarizeEnabled: return AnySettingSpec(Setting.diarizeEnabled)
         case .echoCancellationEnabled: return AnySettingSpec(Setting.echoCancellationEnabled)
+        case .markdownFullMeetingDetails: return AnySettingSpec(Setting.markdownFullMeetingDetails)
         case .voiceMemoUsesAppleTranscript: return AnySettingSpec(Setting.voiceMemoUsesAppleTranscript)
         case .dedupeStreams: return AnySettingSpec(Setting.dedupeStreams)
         case .ownerEmail: return AnySettingSpec(Setting.ownerEmail)
@@ -306,6 +308,10 @@ enum Setting {
     static let echoCancellationEnabled: SettingSpec<Bool> = .bool(
         .echoCancellationEnabled, env: "ECHO_CANCEL", default: true,
         "Remove the other side's voice from the mic track before transcribing (it leaks in when the call plays on speakers).")
+    static let markdownFullMeetingDetails: SettingSpec<Bool> = .bool(
+        .markdownFullMeetingDetails, env: "MARKDOWN_MEETING_DETAILS", default: false,
+        alsoTrue: ["full"], alsoFalse: ["partial"],
+        "Write the calendar invite's attendees, location and notes into the Markdown file (off: title, times and event link only).")
     static let voiceMemoUsesAppleTranscript: SettingSpec<Bool> = .bool(
         .voiceMemoUsesAppleTranscript, env: "VOICE_MEMO_TRANSCRIPT", default: false,
         alsoTrue: ["apple"], alsoFalse: ["whisper"],

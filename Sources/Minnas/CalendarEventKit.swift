@@ -29,6 +29,9 @@ struct UpcomingEvent: Codable, Sendable {
     let location: String?
     let conferencing: String?   // "zoom" | "meet" | "teams" | nil
     let attendees: [Attendee]?
+    /// The invite's description. EventKit fills it; a source that doesn't
+    /// send it leaves it nil.
+    var notes: String? = nil
 }
 
 enum EventKitCalendarError: Error, CustomStringConvertible {
@@ -100,7 +103,8 @@ enum EventKitCalendar {
             url: event.url?.absoluteString,
             location: event.location,
             conferencing: conferencing(in: [event.url?.absoluteString, event.location, event.notes]),
-            attendees: attendees.isEmpty ? nil : attendees
+            attendees: attendees.isEmpty ? nil : attendees,
+            notes: event.notes
         )
     }
 
