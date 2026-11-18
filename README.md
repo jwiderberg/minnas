@@ -1,7 +1,5 @@
 # Minnas
 
-Total recall for your meetings.
-
 Minnas is a Mac menubar app that records your meetings, transcribes them on
 the Mac itself, and drops the result as a Markdown file into a folder you
 pick. "Minnas" is Swedish for "to remember".
