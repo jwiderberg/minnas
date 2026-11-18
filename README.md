@@ -113,7 +113,10 @@ Voice Memos app.
 Minnas came about as a solution to cut through the platform lock-in
 nonsense, reuse your phone as the hardware for physical meetings, and keep
 all your transcriptions, regardless of platform, local and in an open format
-(Markdown) you can dump in Obsidian, Claude Desktop, etc.
+(Markdown) you can import into a note organiser like Obsidian, an LLM
+workspace like Claude Cowork, etc. The Markdown file carries metadata from
+the meeting invite (if you enabled the EventKit integration), which helps
+when organising and gives LLMs useful context.
 
 ## How it works
 
