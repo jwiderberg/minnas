@@ -63,8 +63,8 @@ If the transcript only has your side and nothing from the others, the
 permission to record the call's audio is missing. Check it in System
 Settings as described above and try again.
 
-Tell the people in the meeting that you're recording it. In many places the
-law requires their consent.
+Always tell people in the meeting that you're recording it. It's just good
+manners and in many places the law requires their consent.
 
 ## Background
 
