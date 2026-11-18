@@ -26,7 +26,7 @@ enum BuildFlavor {
     /// frontmatter, for a recording made on this Mac.
     static let device = "mac"
     /// The version a binary outside the bundle reports.
-    static let fallbackVersion = "0.2.1"
+    static let fallbackVersion = "0.2.2"
     /// The folder under ~/Documents first-run setup suggests.
     static let suggestedTranscriptsFolderName = "Minnas Transcripts"
     /// Placeholder of Settings › Transcription › Languages.
