@@ -8,9 +8,6 @@ pick. "Minnas" is Swedish for "to remember".
 
 ## Getting started
 
-This part is for you if you just want to use Minnas and would rather not
-touch the Terminal. The rest of the page goes into detail you can skip.
-
 You need a Mac with an Apple chip (M1 or newer) running macOS 15 or later.
 To check, open the Apple menu and choose About This Mac: "Chip" should say
 Apple M-something, and "macOS" should show 15 or higher. You also need about
